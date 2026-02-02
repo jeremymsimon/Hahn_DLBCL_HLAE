@@ -1,0 +1,778 @@
+---
+title: "Exploration of SEC62 and HLA-E in DLBCL tumors"
+subtitle: "Rendered 01/09/2026"
+author: "Jeremy M. Simon"
+format:
+  html:
+    embed-resources: true
+    toc: true
+editor: visual
+---
+
+# Set up workspace
+
+```{r }
+#| warning: false
+#| error: false
+library(tidyverse)
+library(readxl)
+library(patchwork)
+library(ggpubr)
+library(grid)
+library(ComplexHeatmap)
+library(circlize)
+library(patchwork)
+```
+
+# Import patient metadata from Supplementary Table S9
+
+```{r}
+meta <- read_excel("/tcga-artemis/tcga_DLBCL_APRIL_2018/tcga_DLBCL_APRIL_2018_OPEN-ACCESS_FILES/529be438-e42c-4725-a3f3-66f6fd42ffae/Supplementary_Appendix_2.xlsx", sheet=9) %>%
+	dplyr::filter(!is.na(Diagnosis))
+meta
+```
+
+# Gather expression and genetic subtype info
+
+```{r}
+subtypes <- meta %>%
+	dplyr::select(`dbGaP submitted subject ID`,
+	              `Gene Expression Subgroup`, 
+	              `Genetic Subtype`) %>%
+	dplyr::rename("ID" = `dbGaP submitted subject ID`, 
+	              "ExpressionSubtype" = `Gene Expression Subgroup`, 
+	              "GeneticSubtype" = `Genetic Subtype`
+)
+subtypes
+```
+
+# Import gene expression matrix
+
+This is for all 562 patients
+
+```{r}
+expr <- read_tsv("/tcga-artemis/tcga_DLBCL_APRIL_2018/tcga_DLBCL_APRIL_2018_OPEN-ACCESS_FILES/894155a9-b039-4d50-966c-997b0e2efbc2/RNAseq_gene_expression_562.txt", guess_max=50000) %>%
+	dplyr::select(-Accession,-Gene_ID) %>%
+	pivot_longer(cols = !Gene, names_to="ID", values_to="Expression")
+
+expr
+```
+
+# Import and tidy CNV data by gene
+
+These data are split by individual cohort, each protected access only so no previews given here
+
+```{r}
+ctsp_gene_cnv <- read_tsv("/tcga-artemis/tcga_DLBCL_APRIL_2018/ctsp_DLBCL_APRIL_2018_CTRL-ACCESS_FILES/b292ed1e-191d-4eab-8bb5-1441423842bb/CopyNumber_Summary_45_CTSP-DLBCL1_phs001184/CopyNumber_Gene_45_CTSP-DLBCL1_phs001184.txt")
+
+nciccr_gene_cnv <- read_tsv("/tcga-artemis/tcga_DLBCL_APRIL_2018/nciccr_DLBCL_APRIL_2018_CTRL-ACCESS_FILES/64b783ce-db58-4584-af16-98e4a909c756/CopyNumber_Summary_476_NCICCR-DLBCL_phs001444/CopyNumber_Gene_476_NCICCR-DLBCL_phs001444.txt")
+
+tcga_gene_cnv <- read_tsv("/tcga-artemis/tcga_DLBCL_APRIL_2018/tcga_DLBCL_APRIL_2018_CTRL-ACCESS_FILES/c1f2ed0d-6d3f-417f-a374-6dcfed351406/CopyNumber_Summary_39_TCGA-DLBC_phs000178/CopyNumber_Gene_39_TCGA-DLBC_phs000178.txt")
+```
+
+# Import and tidy SNV data for HLA genes
+
+These data are split by individual cohort, each protected access only
+
+```{r}
+ctsp_snv <- read_tsv("/tcga-artemis/tcga_DLBCL_APRIL_2018/ctsp_DLBCL_APRIL_2018_CTRL-ACCESS_FILES/e5455577-906c-4cb0-9d07-70de3dfe89a1/MAF_CTSP-DLBCL1_phs001184.txt")
+
+nciccr_snv <- read_tsv("/tcga-artemis/tcga_DLBCL_APRIL_2018/nciccr_DLBCL_APRIL_2018_CTRL-ACCESS_FILES/f0325846-10a5-46b9-984d-c93a473bb6a4/MAF_NCICCR-DLBCL_phs001444.txt")
+
+tcga_snv <- read_tsv("/tcga-artemis/tcga_DLBCL_APRIL_2018/tcga_DLBCL_APRIL_2018_CTRL-ACCESS_FILES/7156a0a2-4df1-446f-a8cd-31df5b121e74/MAF_TCGA-DLBC_phs000178.txt")
+
+hla_snvs <- bind_rows(bind_rows(ctsp_snv,nciccr_snv),tcga_snv) %>%
+	dplyr::rename("Gene_Symbol" = `GENE SYMBOL`) %>%
+  dplyr::filter(str_detect(Gene_Symbol, "^HLA-")) %>%
+  dplyr::select(SUBJECT_NAME,Gene_Symbol,MUTATION_TYPE) %>%
+  group_by(SUBJECT_NAME,Gene_Symbol) %>%
+  summarize(SNVs = str_c(MUTATION_TYPE, collapse = ",")) %>%
+  ungroup() %>%
+  right_join(.,expand_grid("SUBJECT_NAME" = meta$`dbGaP submitted subject ID`,
+			"Gene_Symbol" = c("HLA-A","HLA-B","HLA-C","HLA-E","HLA-F","HLA-G")
+	  ),
+	  by=c("SUBJECT_NAME","Gene_Symbol")
+  ) %>%
+  mutate(HLA_SNV = case_when(
+    !is.na(SNVs) ~ "SNV",
+    TRUE ~ SNVs
+    )
+  ) %>%
+  dplyr::select(-SNVs) %>%
+  dplyr::rename("ID" = SUBJECT_NAME)
+	              
+```
+
+# Summarize SEC62 copy number
+
+```{r}
+sec62_cnv <- bind_rows(bind_rows(ctsp_gene_cnv,nciccr_gene_cnv),tcga_gene_cnv) %>%
+	dplyr::filter(Gene_Symbol == "SEC62") %>%
+	dplyr::select(Subject_Name,CopyNubmer_Status) %>%
+	dplyr::rename("SEC62_CopyNumber" = CopyNubmer_Status) %>%
+	left_join(meta, ., by=c("dbGaP submitted subject ID" = "Subject_Name")) %>%
+	dplyr::select(`dbGaP submitted subject ID`,SEC62_CopyNumber) %>%
+	dplyr::rename("ID" = `dbGaP submitted subject ID`) %>%
+	mutate(SEC62_CopyNumber = case_when(
+		is.na(SEC62_CopyNumber) ~ "WT",
+		(SEC62_CopyNumber == "GAIN") | (SEC62_CopyNumber == "AMP") ~ "GAIN",
+		TRUE ~ SEC62_CopyNumber
+		)
+	)
+```
+
+# Plot HLA-E vs SEC62 expression grouped and colored by expression subtype
+
+```{r}
+expr %>%
+    inner_join(subtypes, by="ID") %>%
+    dplyr::filter(Gene %in% c("HLA-E", "SEC62")) %>%
+    pivot_wider(names_from=Gene,values_from=Expression) %>%
+    ggplot(aes(x = `HLA-E`, y = SEC62, color = ExpressionSubtype)) +
+    geom_point() +
+    geom_smooth(method="lm") +
+    stat_cor(method="pearson",label.sep="\n",label.x.npc="left",label.y.npc="bottom",color = "black",vjust=0.1) +
+    facet_wrap(~ExpressionSubtype) +
+    coord_fixed() +
+    theme_bw()
+```
+
+# Plot HLA-E vs SEC62 expression grouped and colored by genetic subtype
+
+```{r}
+expr %>%
+	inner_join(subtypes, by="ID") %>%
+	dplyr::filter(Gene %in% c("HLA-E", "SEC62")) %>%
+	pivot_wider(names_from=Gene,values_from=Expression) %>%
+	ggplot(aes(x = `HLA-E`, y = SEC62, color = GeneticSubtype)) +
+	geom_point() +
+    geom_smooth(method="lm") +
+    stat_cor(method="pearson",label.sep="\n",label.x.npc="left",label.y.npc="bottom",color = "black",vjust=0.1) +
+    facet_wrap(~GeneticSubtype, ncol = 5) +
+	coord_fixed() +
+	theme_bw()
+```
+
+# Plot HLA-E and SEC62 expression as a boxplot, grouped and colored by expression subtype
+
+```{r}
+expr %>%
+	inner_join(subtypes, by="ID") %>%
+	dplyr::filter(Gene %in% c("HLA-E", "SEC62")) %>%
+	ggplot(aes(x = Gene, y = Expression, fill = ExpressionSubtype)) +
+	geom_boxplot(outlier.shape = NA) +
+	geom_point(position = position_jitterdodge(jitter.width = 0.1)) +
+	theme_bw()
+```
+
+# Plot HLA-E vs SEC62 expression as a boxplot, grouped and colored by genetic subtype
+
+```{r}
+expr %>%
+	inner_join(subtypes, by="ID") %>%
+	dplyr::filter(Gene %in% c("HLA-E", "SEC62")) %>%
+	ggplot(aes(x = Gene, y = Expression, fill = GeneticSubtype)) +
+	geom_boxplot(outlier.shape = NA) +
+	geom_point(position = position_jitterdodge(jitter.width = 0.1)) +
+	theme_bw()
+```
+
+# Plot HLA-E vs SEC62 expression as a boxplot, grouped and colored by tumor subtype and SEC62 CNV status
+
+```{r}
+expr %>%
+	inner_join(subtypes, by="ID") %>%
+	inner_join(sec62_cnv, by="ID") %>%
+	dplyr::filter(Gene %in% c("HLA-E", "SEC62")) %>%
+	ggplot(aes(x = fct_relevel(SEC62_CopyNumber,c("HETLOSS","WT","GAIN")), 
+	           y = Expression, 
+	           fill = ExpressionSubtype)) +
+	geom_boxplot(outlier.shape = NA) +
+	geom_point(position = position_jitterdodge(jitter.width = 0.1)) +
+	facet_wrap(~Gene) +
+	theme_bw() +
+	xlab("SEC62 Copy Number")
+
+
+expr %>%
+	inner_join(subtypes, by="ID") %>%
+	inner_join(sec62_cnv, by="ID") %>%
+	dplyr::filter(Gene %in% c("HLA-E", "SEC62")) %>%
+	ggplot(aes(x = fct_relevel(SEC62_CopyNumber,c("HETLOSS","WT","GAIN")), 
+	           y = Expression, 
+	           fill = GeneticSubtype)) +
+	geom_boxplot(outlier.shape = NA) +
+	geom_point(position = position_jitterdodge(jitter.width = 0.1)) +
+	facet_wrap(~Gene) +
+	theme_bw() +
+	xlab("SEC62 Copy Number")
+
+```
+
+# Prepare oncoprint plot with CNV and SNV
+
+## Prepare a character matrix summarizing HLA class I CNVs and SNVs
+
+```{r}
+hla_cnv <- bind_rows(ctsp_gene_cnv,nciccr_gene_cnv,tcga_gene_cnv) %>% 
+			dplyr::rename("ID" = Subject_Name) %>%
+			dplyr::filter(str_detect(Gene_Symbol,"^HLA-") & !str_detect(Gene_Symbol,"^HLA-D")) %>%
+			dplyr::select(ID,Gene_Symbol,CopyNubmer_Status) %>%
+			mutate(Mutation = case_when(
+        !is.na(CopyNubmer_Status) ~ "CNV",
+#        !is.na(CopyNubmer_Status) ~ CopyNubmer_Status,
+        TRUE ~ NA
+        )
+    ) %>%
+    dplyr::select(-CopyNubmer_Status)
+
+hla_cnv_snv_combined <- bind_rows(hla_cnv,hla_snvs %>% dplyr::rename("Mutation" = HLA_SNV)) %>%
+  dplyr::filter(!is.na(Mutation)) %>%
+  group_by(ID,Gene_Symbol) %>%
+  summarize(Mutation = str_c(Mutation, collapse = ",")) %>%
+  ungroup()
+
+
+cnv.mat <- expand_grid("ID" = meta$`dbGaP submitted subject ID`,
+			"Gene_Symbol" = c("HLA-A","HLA-B","HLA-C","HLA-E","HLA-F","HLA-G")
+	) %>%
+	left_join(hla_cnv_snv_combined, by=c("ID","Gene_Symbol")) %>%
+  left_join(meta, ., by=c("dbGaP submitted subject ID" = "ID")) %>%
+  dplyr::select(`dbGaP submitted subject ID`,Mutation,Gene_Symbol) %>%
+	dplyr::rename("ID" = `dbGaP submitted subject ID`) %>%
+	pivot_wider(names_from=Gene_Symbol,values_from=Mutation) %>%
+	column_to_rownames(var="ID") %>%
+	as.matrix()
+```
+
+## Reformat tumor subtypes
+
+```{r}
+subs <- column_to_rownames(subtypes,var="ID") %>%
+	as.data.frame()
+```
+
+## Set up oncoprint functions and colors for mutation types
+
+```{r}
+col <- c(SNV = "red", CNV = "blue")
+# col <- c(SNV = "red", 
+#          HETLOSS = "lightblue", 
+#          HOMDEL = "blue", 
+#          GAIN = "lightgreen",
+#          AMP = "darkgreen"
+#          )
+alter_fun <- list(
+        SNV = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.9, 
+            gp = gpar(fill = col["SNV"], col = NA)),
+        CNV = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.4, 
+            gp = gpar(fill = col["CNV"], col = NA))
+        # HETLOSS = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.4, 
+        #     gp = gpar(fill = col["HETLOSS"], col = NA)),
+        # HOMDEL = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.4, 
+        #     gp = gpar(fill = col["HOMDEL"], col = NA)),
+        # GAIN = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.4, 
+        #     gp = gpar(fill = col["GAIN"], col = NA)),
+        # AMP = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.4, 
+        #     gp = gpar(fill = col["AMP"], col = NA))
+        
+)
+
+get_type_fun <- function(x) strsplit(x, ",")[[1]]
+
+# alter_fun = list(
+#     CNV = function(x, y, w, h) 
+#         grid.rect(x, y, w, h, gp = gpar(fill = "red", col = NA)),
+#     SNV = function(x, y, w, h) 
+#         grid.rect(x, y, w, h, gp = gpar(fill = "blue", col = NA))
+# )
+# 
+# col = c(AMP = "red", GAIN = "red4", HETLOSS = "lightblue", HOMDEL = "blue")
+```
+
+## Reformat SEC62 and HLA-E expression values along with HLA-A, HLA-B, HLA-C
+
+```{r}
+hla_sec62_expr <- expr %>% 
+	dplyr::filter(Gene=="HLA-E" | Gene=="SEC62" | Gene=="HLA-A" | Gene=="HLA-B" | Gene=="HLA-C") %>%
+	pivot_wider(names_from=Gene,values_from=Expression) %>%
+	column_to_rownames(var="ID") %>%
+	as.data.frame()
+head(hla_sec62_expr)
+```
+
+## Print oncoprint heatmap of SNVs and CNVs for all patients
+
+Omit patients for which there were no CNVs in any HLA class I genes
+
+```{r}
+#| fig-height: 12
+ComplexHeatmap::oncoPrint(cnv.mat,
+                        border = TRUE,
+                        alter_fun = alter_fun,
+                        get_type = get_type_fun,
+                        col = col,
+                        remove_empty_rows = TRUE,
+                        show_column_names = TRUE,
+                        show_pct = FALSE,
+                        row_split = factor(subs[rownames(cnv.mat),1]),
+                        row_gap = unit(5, "mm"),
+                        top_annotation = HeatmapAnnotation(
+                            column_barplot = anno_oncoprint_barplot(beside=TRUE, show_fraction = TRUE)
+                            ),
+                        right_annotation = rowAnnotation("HLA-E" = hla_sec62_expr[rownames(cnv.mat),1], 
+                        									               "SEC62" = hla_sec62_expr[rownames(cnv.mat),2],
+                        									               "HLA-A" = hla_sec62_expr[rownames(cnv.mat),3],
+                        									               "HLA-B" = hla_sec62_expr[rownames(cnv.mat),4],
+                        									               "HLA-C" = hla_sec62_expr[rownames(cnv.mat),5],
+                        									                rbar = anno_oncoprint_barplot(),
+                        									                border = TRUE,
+                        									                col = list(
+                        									                  "HLA-E" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red")),
+                        									                  "SEC62" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red")),
+                        									                  "HLA-A" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red")),
+                        									                  "HLA-B" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red")),
+                        									                  "HLA-C" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red"))
+                        												)
+                        								),
+                        show_row_names = FALSE
+)
+```
+
+# Repeat but break CNV into each subtype of CNV
+
+## Prepare a character matrix summarizing HLA class I CNVs and SNVs
+
+```{r}
+hla_cnv <- bind_rows(ctsp_gene_cnv,nciccr_gene_cnv,tcga_gene_cnv) %>% 
+			dplyr::rename("ID" = Subject_Name) %>%
+			dplyr::filter(str_detect(Gene_Symbol,"^HLA-") & !str_detect(Gene_Symbol,"^HLA-D")) %>%
+			dplyr::select(ID,Gene_Symbol,CopyNubmer_Status) %>%
+			mutate(Mutation = case_when(
+#        !is.na(CopyNubmer_Status) ~ "CNV",
+        !is.na(CopyNubmer_Status) ~ CopyNubmer_Status,
+        TRUE ~ NA
+        )
+    ) %>%
+    dplyr::select(-CopyNubmer_Status)
+
+hla_cnv_snv_combined <- bind_rows(hla_cnv,hla_snvs %>% dplyr::rename("Mutation" = HLA_SNV)) %>%
+  dplyr::filter(!is.na(Mutation)) %>%
+  group_by(ID,Gene_Symbol) %>%
+  summarize(Mutation = str_c(Mutation, collapse = ",")) %>%
+  ungroup()
+
+
+cnv.mat <- expand_grid("ID" = meta$`dbGaP submitted subject ID`,
+			"Gene_Symbol" = c("HLA-A","HLA-B","HLA-C","HLA-E","HLA-F","HLA-G")
+	) %>%
+	left_join(hla_cnv_snv_combined, by=c("ID","Gene_Symbol")) %>%
+  left_join(meta, ., by=c("dbGaP submitted subject ID" = "ID")) %>%
+  dplyr::select(`dbGaP submitted subject ID`,Mutation,Gene_Symbol) %>%
+	dplyr::rename("ID" = `dbGaP submitted subject ID`) %>%
+	pivot_wider(names_from=Gene_Symbol,values_from=Mutation) %>%
+	column_to_rownames(var="ID") %>%
+	as.matrix()
+```
+
+## Summarize HLA gene CNV counts by expression subtype
+
+```{r}
+#| fig-width: 10
+p1 <- expand_grid("ID" = meta$`dbGaP submitted subject ID`,
+            "Gene_Symbol" = c("HLA-A","HLA-B","HLA-C","HLA-E","HLA-F","HLA-G")
+) %>%
+    left_join(hla_cnv, by=c("ID","Gene_Symbol")) %>%
+    left_join(meta, ., by=c("dbGaP submitted subject ID" = "ID")) %>%
+    dplyr::select(`dbGaP submitted subject ID`,Mutation,Gene_Symbol) %>%
+    dplyr::rename("ID" = `dbGaP submitted subject ID`) %>%
+    left_join(subtypes,by="ID") %>%
+    dplyr::filter(!is.na(Mutation)) %>%
+    ggplot(aes(x = ExpressionSubtype, fill = Mutation)) +
+    geom_bar() +
+    facet_wrap(~Gene_Symbol, ncol = 6) +
+    theme_bw()
+
+p2 <- expand_grid("ID" = meta$`dbGaP submitted subject ID`,
+            "Gene_Symbol" = c("HLA-A","HLA-B","HLA-C","HLA-E","HLA-F","HLA-G")
+) %>%
+    left_join(hla_cnv, by=c("ID","Gene_Symbol")) %>%
+    left_join(meta, ., by=c("dbGaP submitted subject ID" = "ID")) %>%
+    dplyr::select(`dbGaP submitted subject ID`,Mutation,Gene_Symbol) %>%
+    dplyr::rename("ID" = `dbGaP submitted subject ID`) %>%
+    left_join(subtypes,by="ID") %>%
+    dplyr::filter(!is.na(Mutation)) %>%
+    ggplot(aes(x = ExpressionSubtype, fill = Mutation)) +
+    geom_bar(position = "fill") +
+    facet_wrap(~Gene_Symbol, ncol = 6) +
+    ylab("Proportion of mutated tumors") +
+    theme_bw()
+
+p1 / p2
+
+```
+
+### Represent proportions of HET and HOM loss as a heatmap
+```{r}
+cnvloss_mat <- expand_grid("ID" = meta$`dbGaP submitted subject ID`,
+            "Gene_Symbol" = c("HLA-A","HLA-B","HLA-C","HLA-E","HLA-F","HLA-G")
+) %>%
+    left_join(hla_cnv_snv_combined, by=c("ID","Gene_Symbol")) %>%
+    left_join(meta, ., by=c("dbGaP submitted subject ID" = "ID")) %>%
+    dplyr::select(`dbGaP submitted subject ID`,Mutation,Gene_Symbol) %>%
+    dplyr::rename("ID" = `dbGaP submitted subject ID`) %>%
+    left_join(subtypes,by="ID") %>%
+    mutate(CNV = case_when(
+        str_detect(Mutation,"LOSS") ~ "HETLOSS",
+        str_detect(Mutation,"DEL") ~ "HOMDEL",
+        TRUE ~ NA
+    )) %>%
+    dplyr::select(-Mutation) %>%
+    group_by(CNV,Gene_Symbol,ExpressionSubtype) %>%
+    summarize(n = dplyr::n()) %>%
+    ungroup() %>%
+    group_by(Gene_Symbol,ExpressionSubtype) %>%
+    mutate(Freq = n / sum(n)) %>%
+    dplyr::filter(!is.na(CNV)) %>%
+    dplyr::select(-n) %>%
+    pivot_wider(names_from=c(ExpressionSubtype,CNV),values_from=Freq) %>%
+    column_to_rownames(var="Gene_Symbol") %>%
+    as.data.frame() %>%
+    as.matrix()
+
+ComplexHeatmap::Heatmap(cnvloss_mat,
+                        cluster_rows = FALSE,
+                        cluster_columns = FALSE,
+                        column_split = factor(colnames(cnvloss_mat)),
+                        column_title_gp = gpar(fontsize = 4),
+                        row_split = factor(rownames(cnvloss_mat)),
+                        row_title_gp = gpar(fontsize = 4),
+                        column_labels = str_replace_all(colnames(cnvloss_mat),".+_",""),
+                        name = "Fraction of tumors",
+                        heatmap_legend_param = list(title_position = "leftcenter-rot",
+                                                    border = TRUE),
+                        na_col = "white",
+                        border = TRUE,
+                        col = circlize::colorRamp2(c(0,0.2),c("white","blue"))
+                        )
+
+```
+
+```{r}
+#| echo: false
+pdf("DLBCL-2018_HLA_CNV_HET_HOM_loss_heatmap.pdf")
+ComplexHeatmap::Heatmap(cnvloss_mat,
+                        cluster_rows = FALSE,
+                        cluster_columns = FALSE,
+                        column_split = factor(colnames(cnvloss_mat)),
+                        column_title_gp = gpar(fontsize = 4),
+                        row_split = factor(rownames(cnvloss_mat)),
+                        row_title_gp = gpar(fontsize = 4),
+                        column_labels = str_replace_all(colnames(cnvloss_mat),".+_",""),
+                        name = "Fraction of tumors",
+                        heatmap_legend_param = list(title_position = "leftcenter-rot",
+                                                    border = TRUE),
+                        na_col = "white",
+                        border = TRUE,
+                        col = circlize::colorRamp2(c(0,0.2),c("white","blue"))
+)
+dev.off()
+```
+
+## Summarize HLA gene CNV counts by genetic subtype
+
+```{r}
+#| fig-width: 12
+p3 <- expand_grid("ID" = meta$`dbGaP submitted subject ID`,
+            "Gene_Symbol" = c("HLA-A","HLA-B","HLA-C","HLA-E","HLA-F","HLA-G")
+) %>%
+    left_join(hla_cnv, by=c("ID","Gene_Symbol")) %>%
+    left_join(meta, ., by=c("dbGaP submitted subject ID" = "ID")) %>%
+    dplyr::select(`dbGaP submitted subject ID`,Mutation,Gene_Symbol) %>%
+    dplyr::rename("ID" = `dbGaP submitted subject ID`) %>%
+    left_join(subtypes,by="ID") %>%
+    dplyr::filter(!is.na(Mutation)) %>%
+    ggplot(aes(x = GeneticSubtype, fill = Mutation)) +
+    geom_bar() +
+    facet_wrap(~Gene_Symbol, ncol = 6) +
+    theme_bw()
+
+p4 <- expand_grid("ID" = meta$`dbGaP submitted subject ID`,
+            "Gene_Symbol" = c("HLA-A","HLA-B","HLA-C","HLA-E","HLA-F","HLA-G")
+) %>%
+    left_join(hla_cnv, by=c("ID","Gene_Symbol")) %>%
+    left_join(meta, ., by=c("dbGaP submitted subject ID" = "ID")) %>%
+    dplyr::select(`dbGaP submitted subject ID`,Mutation,Gene_Symbol) %>%
+    dplyr::rename("ID" = `dbGaP submitted subject ID`) %>%
+    left_join(subtypes,by="ID") %>%
+    dplyr::filter(!is.na(Mutation)) %>%
+    ggplot(aes(x = GeneticSubtype, fill = Mutation)) +
+    geom_bar(position = "fill") +
+    facet_wrap(~Gene_Symbol, ncol = 6) +
+    ylab("Proportion of tumors") +
+    theme_bw()
+
+p3 / p4
+
+```
+
+## Reformat tumor subtypes
+
+```{r}
+subs <- column_to_rownames(subtypes,var="ID") %>%
+	as.data.frame()
+```
+
+## Set up oncoprint functions and colors for mutation types
+
+```{r}
+#col <- c(SNV = "red", CNV = "blue")
+col <- c(SNV = "red", 
+         HETLOSS = "lightblue", 
+         HOMDEL = "blue", 
+         GAIN = "lightgreen",
+         AMP = "darkgreen"
+         )
+alter_fun <- list(
+        SNV = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.9, 
+            gp = gpar(fill = col["SNV"], col = NA)),
+#        CNV = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.4, 
+#            gp = gpar(fill = col["CNV"], col = NA)),
+        HETLOSS = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.4, 
+            gp = gpar(fill = col["HETLOSS"], col = NA)),
+        HOMDEL = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.4, 
+            gp = gpar(fill = col["HOMDEL"], col = NA)),
+        GAIN = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.4, 
+            gp = gpar(fill = col["GAIN"], col = NA)),
+        AMP = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.4, 
+            gp = gpar(fill = col["AMP"], col = NA))
+        
+)
+
+get_type_fun <- function(x) strsplit(x, ",")[[1]]
+
+# alter_fun = list(
+#     CNV = function(x, y, w, h) 
+#         grid.rect(x, y, w, h, gp = gpar(fill = "red", col = NA)),
+#     SNV = function(x, y, w, h) 
+#         grid.rect(x, y, w, h, gp = gpar(fill = "blue", col = NA))
+# )
+# 
+# col = c(AMP = "red", GAIN = "red4", HETLOSS = "lightblue", HOMDEL = "blue")
+```
+
+## Print oncoprint heatmap of CNV types for all patients
+
+Omit patients for which there were no CNVs in any HLA class I genes
+
+```{r}
+#| fig-height: 12
+ComplexHeatmap::oncoPrint(cnv.mat,
+                        border = TRUE,
+                        alter_fun = alter_fun,
+                        get_type = get_type_fun,
+                        col = col,
+                        remove_empty_rows = TRUE,
+                        show_column_names = TRUE,
+                        show_pct = FALSE,
+                        row_split = factor(subs[rownames(cnv.mat),1]),
+                        row_gap = unit(5, "mm"),
+                        top_annotation = HeatmapAnnotation(
+                            column_barplot = anno_oncoprint_barplot(beside=TRUE, show_fraction = TRUE)
+                            ),
+                        right_annotation = rowAnnotation("HLA-E" = hla_sec62_expr[rownames(cnv.mat),1], 
+                        									               "SEC62" = hla_sec62_expr[rownames(cnv.mat),2],
+                        									               "HLA-A" = hla_sec62_expr[rownames(cnv.mat),3],
+                        									               "HLA-B" = hla_sec62_expr[rownames(cnv.mat),4],
+                        									               "HLA-C" = hla_sec62_expr[rownames(cnv.mat),5],
+                        									                rbar = anno_oncoprint_barplot(),
+                        									                border = TRUE,
+                        									                col = list(
+                        									                  "HLA-E" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red")),
+                        									                  "SEC62" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red")),
+                        									                  "HLA-A" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red")),
+                        									                  "HLA-B" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red")),
+                        									                  "HLA-C" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red"))
+                        												)
+                        								),
+                        show_row_names = FALSE
+)
+```
+
+# Repeat but drop the GAIN and AMP status
+
+## Prepare a character matrix summarizing HLA class I CNVs and SNVs
+
+```{r}
+hla_cnv <- bind_rows(ctsp_gene_cnv,nciccr_gene_cnv,tcga_gene_cnv) %>% 
+			dplyr::rename("ID" = Subject_Name) %>%
+			dplyr::filter(str_detect(Gene_Symbol,"^HLA-") & !str_detect(Gene_Symbol,"^HLA-D")) %>%
+			dplyr::select(ID,Gene_Symbol,CopyNubmer_Status) %>%
+      dplyr::filter(CopyNubmer_Status != "GAIN" & CopyNubmer_Status != "AMP") %>%
+			mutate(Mutation = case_when(
+#        !is.na(CopyNubmer_Status) ~ "CNV",
+        !is.na(CopyNubmer_Status) ~ CopyNubmer_Status,
+        TRUE ~ NA
+        )
+    ) %>%
+    dplyr::select(-CopyNubmer_Status)
+
+hla_cnv_snv_combined <- bind_rows(hla_cnv,hla_snvs %>% dplyr::rename("Mutation" = HLA_SNV)) %>%
+  dplyr::filter(!is.na(Mutation)) %>%
+  group_by(ID,Gene_Symbol) %>%
+  summarize(Mutation = str_c(Mutation, collapse = ",")) %>%
+  ungroup()
+
+
+cnv.mat <- expand_grid("ID" = meta$`dbGaP submitted subject ID`,
+			"Gene_Symbol" = c("HLA-A","HLA-B","HLA-C","HLA-E","HLA-F","HLA-G")
+	) %>%
+	left_join(hla_cnv_snv_combined, by=c("ID","Gene_Symbol")) %>%
+  left_join(meta, ., by=c("dbGaP submitted subject ID" = "ID")) %>%
+  dplyr::select(`dbGaP submitted subject ID`,Mutation,Gene_Symbol) %>%
+	dplyr::rename("ID" = `dbGaP submitted subject ID`) %>%
+	pivot_wider(names_from=Gene_Symbol,values_from=Mutation) %>%
+	column_to_rownames(var="ID") %>%
+	as.matrix()
+```
+
+## Reformat tumor subtypes
+
+```{r}
+subs <- column_to_rownames(subtypes,var="ID") %>%
+	as.data.frame()
+```
+
+## Set up oncoprint functions and colors for mutation types
+
+```{r}
+#col <- c(SNV = "red", CNV = "blue")
+col <- c(SNV = "purple", 
+         HETLOSS = "dodgerblue", 
+         HOMDEL = "dodgerblue4" 
+#         GAIN = "lightgreen",
+#         AMP = "darkgreen"
+         )
+alter_fun <- list(
+        SNV = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.9, 
+            gp = gpar(fill = col["SNV"], col = NA)),
+#        CNV = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.4, 
+#            gp = gpar(fill = col["CNV"], col = NA)),
+        HETLOSS = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.4, 
+            gp = gpar(fill = col["HETLOSS"], col = NA)),
+        HOMDEL = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.4, 
+            gp = gpar(fill = col["HOMDEL"], col = NA))
+#        GAIN = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.4, 
+#            gp = gpar(fill = col["GAIN"], col = NA)),
+#        AMP = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.4, 
+#            gp = gpar(fill = col["AMP"], col = NA))
+        
+)
+
+get_type_fun <- function(x) strsplit(x, ",")[[1]]
+
+# alter_fun = list(
+#     CNV = function(x, y, w, h) 
+#         grid.rect(x, y, w, h, gp = gpar(fill = "red", col = NA)),
+#     SNV = function(x, y, w, h) 
+#         grid.rect(x, y, w, h, gp = gpar(fill = "blue", col = NA))
+# )
+# 
+# col = c(AMP = "red", GAIN = "red4", HETLOSS = "lightblue", HOMDEL = "blue")
+```
+
+## Print oncoprint heatmap of CNV types for all patients
+
+Omit patients for which there were no CNVs in any HLA class I genes
+
+```{r}
+#| fig-height: 12
+ComplexHeatmap::oncoPrint(cnv.mat,
+                        border = TRUE,
+                        alter_fun = alter_fun,
+                        get_type = get_type_fun,
+                        col = col,
+                        remove_empty_rows = TRUE,
+                        show_column_names = TRUE,
+                        column_order = c("HLA-A","HLA-B","HLA-C","HLA-E","HLA-F","HLA-G"),
+                        show_pct = FALSE,
+                        row_split = factor(subs[rownames(cnv.mat),1]),
+                        row_gap = unit(5, "mm"),
+                        top_annotation = HeatmapAnnotation(
+                            column_barplot = anno_oncoprint_barplot(beside=TRUE, show_fraction = TRUE)
+                            ),
+                        right_annotation = rowAnnotation("HLA-E" = hla_sec62_expr[rownames(cnv.mat),1],
+                        									               "HLA-A" = hla_sec62_expr[rownames(cnv.mat),3],
+                        									               "HLA-B" = hla_sec62_expr[rownames(cnv.mat),4],
+                        									               "HLA-C" = hla_sec62_expr[rownames(cnv.mat),5],
+                        									                #rbar = anno_oncoprint_barplot(),
+                        									                border = TRUE,
+                        									                col = list(
+                        									                  "HLA-E" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red")),
+                        									                  "HLA-A" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red")),
+                        									                  "HLA-B" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red")),
+                        									                  "HLA-C" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red"))
+                        												)
+                        								),
+                        show_row_names = FALSE
+)
+```
+
+```{r}
+#| echo: false
+pdf("DLBCL-2018_HLA_CNV_SNV_expression_oncoprint_heatmap.pdf",height=8,width=5)
+ComplexHeatmap::oncoPrint(cnv.mat,
+                        border = TRUE,
+                        alter_fun = alter_fun,
+                        get_type = get_type_fun,
+                        col = col,
+                        remove_empty_rows = TRUE,
+                        show_column_names = TRUE,
+                        column_order = c("HLA-A","HLA-B","HLA-C","HLA-E","HLA-F","HLA-G"),
+                        show_pct = FALSE,
+                        row_split = factor(subs[rownames(cnv.mat),1]),
+                        row_gap = unit(5, "mm"),
+                        top_annotation = HeatmapAnnotation(
+                            column_barplot = anno_oncoprint_barplot(beside=TRUE, show_fraction = TRUE)
+                            ),
+                        right_annotation = rowAnnotation("HLA-E" = hla_sec62_expr[rownames(cnv.mat),1],
+                        									               "HLA-A" = hla_sec62_expr[rownames(cnv.mat),3],
+                        									               "HLA-B" = hla_sec62_expr[rownames(cnv.mat),4],
+                        									               "HLA-C" = hla_sec62_expr[rownames(cnv.mat),5],
+                        									                #rbar = anno_oncoprint_barplot(),
+                        									                border = TRUE,
+                        									                col = list(
+                        									                  "HLA-E" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red")),
+                        									                  "HLA-A" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red")),
+                        									                  "HLA-B" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red")),
+                        									                  "HLA-C" = circlize::colorRamp2(c(5, 20), 
+                        									                                                 c("white","red"))
+                        												)
+                        								),
+                        show_row_names = FALSE
+)
+dev.off()
+```
+
+# Get session info
+
+```{r}
+sessionInfo()
+```
