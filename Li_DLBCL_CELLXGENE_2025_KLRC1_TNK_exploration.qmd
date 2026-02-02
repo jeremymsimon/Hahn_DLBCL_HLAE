@@ -1,0 +1,1440 @@
+---
+title: "Exploration of KLRC1 and HLA-E expression in DLBCL scRNA data"
+subtitle: "Rendered 01/30/2026"
+author: "Jeremy M. Simon"
+format:
+  html:
+    embed-resources: true
+    toc: true
+editor: visual
+---
+
+# Set up workspace
+
+```{r }
+#| warning: false
+#| error: false
+library(tidyverse)
+library(readxl)
+library(ggridges)
+library(reticulate)
+library(sceasy)
+library(Seurat)
+library(ggrepel)
+library(ComplexHeatmap)
+library(circlize)
+library(scales)
+library(snakecase)
+library(janitor)
+library(scCustomize)
+library(Nebulosa)
+library(paletteer)
+reticulate::use_python("/jsimonlab/tools/miniforge3/bin/python")
+
+# Import `anndata` python package
+ad <- import("anndata", convert = FALSE)
+```
+
+# Retrieve data from CELLXGENE corresponding to DLBCL scRNA data from Li *et al.* 2025 `Large B cell lymphoma microenvironment archetype profiles`
+
+## Download `h5ad` object
+
+```{bash}
+#| eval: false
+curl -O https://datasets.cellxgene.cziscience.com/a6d84abf-21d0-4560-ada4-2af315f3c1e1.h5ad
+```
+
+## Convert h5ad to seurat object
+
+```{r}
+#| eval: false
+li_dlbcl <- sceasy::convertFormat("a6d84abf-21d0-4560-ada4-2af315f3c1e1.h5ad", 
+  from = "anndata", 
+  to = "seurat",
+  outFile = "a6d84abf-21d0-4560-ada4-2af315f3c1e1_seurat.rds")
+
+```
+
+```{r}
+#| echo: false
+li_dlbcl <- readRDS("a6d84abf-21d0-4560-ada4-2af315f3c1e1_seurat.rds")
+```
+
+## Plot UMAP labeled by broad cell type
+
+```{r}
+#| fig-width: 10
+DimPlot(li_dlbcl, group.by = "cell_type")
+```
+
+## Make tibble of feature-level metadata including gene symbols
+
+```{r}
+feature_meta <- rownames_to_column(li_dlbcl@assays$RNA@meta.features,var="id") %>%
+  as_tibble()
+```
+
+## Make simple lookup function for getting gene symbol from gene id
+
+```{r}
+get_id <- function(query = NULL, meta_tbl = NULL, id_col = NULL, sym_col = NULL) {
+  if(is.null(query) | is.null(meta_tbl) | is.null(id_col) | is.null(sym_col)) {
+    stop("Please supply query, meta_tbl, id_col, and sym_col values")
+  }
+  stopifnot(is.character(query))
+  stopifnot(is_tibble(meta_tbl))
+  
+  #check if named columns exist
+  if(length(colnames(meta_tbl)[colnames(meta_tbl) %in% c(id_col,sym_col)]) != 2) {
+    stop(paste0("Selected columns ",id_col," or ",sym_col," don't exist in meta_tbl"))
+  }
+  
+  lookup_df <- meta_tbl %>% 
+    dplyr::select(all_of(c(id_col,sym_col))) %>%
+    as.data.frame()
+
+  id <- as.character(lookup_df[lookup_df[,sym_col] == query,][,id_col])
+  return(id)
+}
+```
+
+## Plot UMAP colored by KLRC1 expression
+
+```{r}
+FeaturePlot(li_dlbcl,
+            features = get_id("KLRC1", 
+                              meta_tbl = feature_meta,
+                              id_col = "id",
+                              sym_col = "gene_symbols"),
+            order = TRUE)
+
+scCustomize::Plot_Density_Custom(li_dlbcl, 
+				features = get_id("KLRC1",
+                              		meta_tbl = feature_meta,
+                              		id_col = "id",
+                              		sym_col = "gene_symbols"),
+				viridis_palette = "viridis")
+
+KLRC1 <- WhichCells(object = li_dlbcl, expression = ENSG00000134545 > 2, slot = "counts")
+highlight_cells <- list("KLRC1" = KLRC1)
+Cell_Highlight_Plot(seurat_object = li_dlbcl, 
+			cells_highlight = highlight_cells, 
+			raster = FALSE)
+
+FeaturePlot_scCustom(seurat_object = li_dlbcl, 
+                     features = "ENSG00000134545", 
+                     na_cutoff = 1.5, 
+                     colors_use = rev(paletteer::paletteer_c("viridis::mako",n = 250)),
+                     raster = FALSE)
+```
+
+```{r}
+#| echo: false
+pdf("Li_DLBCL_CELLXGENE_2025_KLRC1_UMAP.pdf")
+FeaturePlot_scCustom(seurat_object = li_dlbcl, 
+                     features = "ENSG00000134545", 
+                     na_cutoff = 1.5, 
+                     colors_use = rev(paletteer::paletteer_c("viridis::mako",n = 250)),
+                     raster = FALSE)
+dev.off()
+```
+
+## Plot KLRC1 expression by cell type
+
+```{r}
+#| fig-width: 12
+VlnPlot(li_dlbcl,
+        features = get_id("KLRC1", 
+                              meta_tbl = feature_meta,
+                              id_col = "id",
+                              sym_col = "gene_symbols"),
+        group.by = "cellsubset",
+        sort = "increasing",
+        pt.size = 0) + 
+  NoLegend()
+```
+
+## Plot KLRC1 expression by broader cell type (not cluster)
+
+```{r}
+#| fig-width: 12
+VlnPlot(li_dlbcl,
+        features = get_id("KLRC1", 
+                              meta_tbl = feature_meta,
+                              id_col = "id",
+                              sym_col = "gene_symbols"),
+        group.by = "cell_type",
+        sort = "increasing",
+        pt.size = 0) + 
+  NoLegend()
+```
+
+## Import markers of each cell type from Supplemental Table S2 from https://www.cell.com/cancer-cell/fulltext/S1535-6108(25)00228-4
+
+```{r}
+s2_cd8 <- read_excel("mmc3.xlsx", sheet = 2, skip = 1)
+s2_nk <- read_excel("mmc3.xlsx", sheet = 4, skip = 1)
+
+```
+
+### Plot volcano plots of expression in each
+
+```{r}
+s2_cd8 %>%
+  dplyr::filter(reference=="rest of CD8T cells") %>%
+  mutate(Significance = case_when(
+    pvals_adj < 0.05 ~ "p < 0.05",
+    TRUE ~ "p >= 0.05"
+    )
+  ) %>%
+  mutate(LogP = ifelse(pvals_adj > 0, -log10(pvals_adj), 305)) %>%
+  ggplot(aes(x = logfoldchanges, y = LogP, color = Significance, label = gene)) +
+  geom_point(size=0.5) +
+  theme_bw() +
+  facet_wrap(~cellsubset) +
+  geom_text_repel(data = s2_cd8 %>%
+                      dplyr::filter(reference=="rest of CD8T cells") %>%
+                      mutate(Significance = case_when(
+                       pvals_adj < 0.05 ~ "p < 0.05",
+                       TRUE ~ "p >= 0.05"
+                     )
+                     ) %>%
+                     mutate(LogP = ifelse(pvals_adj > 0, -log10(pvals_adj), 305)) %>%
+                     dplyr::filter(gene=="KLRC1"),
+                   segment.size  = 0.2,
+                   segment.color = "black",
+                   color = "black",
+                   force = 10,
+                   nudge_y = -25,
+                   max.overlaps = 100,
+                   min.segment.length = 0,
+                   show.legend = FALSE
+  )
+
+s2_nk %>%
+  dplyr::filter(reference=="rest of NK cells") %>%
+  mutate(Significance = case_when(
+    pvals_adj < 0.05 ~ "p < 0.05",
+    TRUE ~ "p >= 0.05"
+    )
+  ) %>%
+  mutate(LogP = ifelse(pvals_adj > 0, -log10(pvals_adj), 305)) %>%
+  ggplot(aes(x = logfoldchanges, y = LogP, color = Significance, label = gene)) +
+  geom_point(size=0.5) +
+  theme_bw() +
+  facet_wrap(~cellsubset) +
+  geom_text_repel(data = s2_nk %>%
+                      dplyr::filter(reference=="rest of NK cells") %>%
+                      mutate(Significance = case_when(
+                       pvals_adj < 0.05 ~ "p < 0.05",
+                       TRUE ~ "p >= 0.05"
+                     )
+                     ) %>%
+                     mutate(LogP = ifelse(pvals_adj > 0, -log10(pvals_adj), 305)) %>%
+                     dplyr::filter(gene=="KLRC1"),
+                   segment.size  = 0.2,
+                   segment.color = "black",
+                   color = "black",
+                   force = 10,
+                   nudge_y = -25,
+                   max.overlaps = 100,
+                   min.segment.length = 0,
+                   show.legend = FALSE
+  )
+```
+
+## Re-compute these markers ourselves so we can include negative log2-fold-changes as well
+
+### CD8
+
+```{r}
+#| fig-width: 10
+#| fig-height: 10
+cd8_subset <- subset(li_dlbcl,subset = cell_type=="CD8-positive, alpha-beta T cell")
+Idents(cd8_subset) <- cd8_subset$cellsubset
+
+cd8_markers <- FindAllMarkers(cd8_subset,
+                              logfc.threshold = 0,
+                              only.pos = FALSE
+                              )
+as_tibble(cd8_markers) %>%
+  left_join(feature_meta %>% dplyr::select(id,gene_symbols),by=c("gene" = "id")) %>%
+  rowwise() %>%
+  mutate(Significance = case_when(
+    p_val_adj < 0.05 ~ "p < 0.05",
+    TRUE ~ "p >= 0.05"
+    )
+  ) %>%
+  mutate(LogP = ifelse(p_val_adj > 0, -log10(p_val_adj), 305)) %>%
+  ungroup() %>%
+  ggplot(aes(x = avg_log2FC, y = LogP, color = Significance, label = gene_symbols)) +
+  geom_point(size=0.5) +
+  geom_vline(xintercept = 0, linetype = 2,col="red", alpha=0.5) +
+  theme_bw() +
+  xlab("log2 fold-change vs rest of CD8 T cells") +
+  ylab("-log10 adj. p-value") +
+  facet_wrap(~cluster) +
+  geom_text_repel(data = as_tibble(cd8_markers) %>%
+            left_join(feature_meta %>% 
+                        dplyr::select(id,gene_symbols),
+                      by=c("gene" = "id")) %>%
+              rowwise() %>%
+              mutate(Significance = case_when(
+                       p_val_adj < 0.05 ~ "p < 0.05",
+                       TRUE ~ "p >= 0.05"
+                     )
+              ) %>%
+              mutate(LogP = ifelse(p_val_adj > 0, -log10(p_val_adj), 305)) %>%
+              dplyr::filter(gene_symbols=="KLRC1" & avg_log2FC > 0.58),
+                   segment.size  = 0.2,
+                   segment.color = "black",
+                   color = "black",
+                   force = 10,
+                   nudge_y = -25,
+                   max.overlaps = 100,
+                   min.segment.length = 0,
+                   show.legend = FALSE
+  )
+  
+```
+
+
+
+### NK
+
+```{r}
+nk_subset <- subset(li_dlbcl,subset = cell_type=="natural killer cell")
+Idents(nk_subset) <- nk_subset$cellsubset
+
+nk_markers <- FindAllMarkers(nk_subset,
+                              logfc.threshold = 0,
+                              only.pos = FALSE
+                              )
+as_tibble(nk_markers) %>%
+  left_join(feature_meta %>% dplyr::select(id,gene_symbols),by=c("gene" = "id")) %>%
+  rowwise() %>%
+  mutate(Significance = case_when(
+    p_val_adj < 0.05 ~ "p < 0.05",
+    TRUE ~ "p >= 0.05"
+    )
+  ) %>%
+  mutate(LogP = ifelse(p_val_adj > 0, -log10(p_val_adj), 305)) %>%
+  ungroup() %>%
+  ggplot(aes(x = avg_log2FC, y = LogP, color = Significance, label = gene_symbols)) +
+  geom_point(size=0.5) +
+  geom_vline(xintercept = 0, linetype = 2,col="red", alpha=0.5) +
+  theme_bw() +
+  xlab("log2 fold-change vs rest of NK cells") +
+  ylab("-log10 adj. p-value") +
+  facet_wrap(~cluster) +
+  geom_text_repel(data = as_tibble(nk_markers) %>%
+            left_join(feature_meta %>% 
+                        dplyr::select(id,gene_symbols),
+                      by=c("gene" = "id")) %>%
+              rowwise() %>%
+              mutate(Significance = case_when(
+                       p_val_adj < 0.05 ~ "p < 0.05",
+                       TRUE ~ "p >= 0.05"
+                     )
+              ) %>%
+              mutate(LogP = ifelse(p_val_adj > 0, -log10(p_val_adj), 305)) %>%
+              dplyr::filter(gene_symbols=="KLRC1" & avg_log2FC > 0.58),
+                   segment.size  = 0.2,
+                   segment.color = "black",
+                   color = "black",
+                   force = 10,
+                   nudge_y = -25,
+                   max.overlaps = 100,
+                   min.segment.length = 0,
+                   show.legend = FALSE
+  )
+```
+
+```{r}
+#| echo: false
+pdf("Li_DLBCL_CELLXGENE_2025_NK_markerGenes_volcano.pdf")
+as_tibble(nk_markers) %>%
+  left_join(feature_meta %>% dplyr::select(id,gene_symbols),by=c("gene" = "id")) %>%
+  rowwise() %>%
+  mutate(Significance = case_when(
+    p_val_adj < 0.05 ~ "p < 0.05",
+    TRUE ~ "p >= 0.05"
+    )
+  ) %>%
+  mutate(LogP = ifelse(p_val_adj > 0, -log10(p_val_adj), 305)) %>%
+  ungroup() %>%
+  ggplot(aes(x = avg_log2FC, y = LogP, color = Significance, label = gene_symbols)) +
+  geom_point(size=0.5) +
+  geom_vline(xintercept = 0, linetype = 2,col="red", alpha=0.5) +
+  theme_bw() +
+  xlab("log2 fold-change vs rest of NK cells") +
+  ylab("-log10 adj. p-value") +
+  facet_wrap(~cluster) +
+  geom_text_repel(data = as_tibble(nk_markers) %>%
+            left_join(feature_meta %>% 
+                        dplyr::select(id,gene_symbols),
+                      by=c("gene" = "id")) %>%
+              rowwise() %>%
+              mutate(Significance = case_when(
+                       p_val_adj < 0.05 ~ "p < 0.05",
+                       TRUE ~ "p >= 0.05"
+                     )
+              ) %>%
+              mutate(LogP = ifelse(p_val_adj > 0, -log10(p_val_adj), 305)) %>%
+              dplyr::filter(gene_symbols=="KLRC1" & avg_log2FC > 0.58),
+                   segment.size  = 0.2,
+                   segment.color = "black",
+                   color = "black",
+                   force = 10,
+                   nudge_y = -25,
+                   max.overlaps = 100,
+                   min.segment.length = 0,
+                   show.legend = FALSE
+  )
+dev.off()
+```
+
+# Retrieve patient characteristics table from published paper
+
+## Download Table S1 file from https://www.cell.com/cancer-cell/fulltext/S1535-6108(25)00228-4
+
+## Import
+
+```{r}
+s1a <- read_excel("mmc2.xlsx", sheet = 1, skip = 1)
+s1b <- read_excel("mmc2.xlsx", sheet = 2, skip = 1)
+
+s1a
+s1b
+```
+
+# Explore KLRC1 expression in a variety of comparison groups among the T/NK lineage
+
+## Extract KLRC1 expression for all cells, annotated with cell metadata from seurat object
+
+```{r}
+li_data <- GetAssayData(li_dlbcl,layer="data",assay="RNA")
+li_klrc1 <- li_data[get_id("KLRC1", 
+                              meta_tbl = feature_meta,
+                              id_col = "id",
+                              sym_col = "gene_symbols"),]
+
+li_klrc1_annot <- enframe(li_klrc1,name="Cell",value="KLRC1") %>% 
+  as_tibble() %>%
+  inner_join(rownames_to_column(as.data.frame(li_dlbcl@meta.data),var="Cell") %>%
+        as_tibble(),
+    by = "Cell")
+```
+
+## Is KLRC1 present in the DLBCL microenvironment and in what cell types?
+
+```{r}
+#| fig-width: 12
+li_klrc1_annot %>%
+    dplyr::filter(diagnosis=="DLBCL") %>%
+    dplyr::select(Cell,KLRC1,sample_id,cellsubset) %>%
+    group_by(sample_id,cellsubset) %>%
+    summarize(Mean = mean(KLRC1)) %>%
+    ggplot(aes(x = reorder(cellsubset,-Mean), y = Mean, fill = cellsubset)) +
+    geom_boxplot(outliers = FALSE) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=6)) +
+    guides(fill = "none") +
+    xlab("Cell type") +
+    ylab("Mean KLRC1 expression among DLBCL TME cell types")
+```
+
+## Plot same except by broader cell type definition
+
+```{r}
+#| fig-width: 12
+li_klrc1_annot %>%
+    dplyr::filter(diagnosis=="DLBCL") %>%
+    dplyr::select(Cell,KLRC1,sample_id,cell_type) %>%
+    group_by(sample_id,cell_type) %>%
+    summarize(Mean = mean(KLRC1)) %>%
+    ggplot(aes(x = reorder(cell_type,-Mean), y = Mean, fill = cell_type)) +
+    geom_boxplot(outliers = FALSE) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=6)) +
+    guides(fill = "none") +
+    xlab("Cell type") +
+    ylab("Mean KLRC1 expression among DLBCL TME cell types") +
+    scale_fill_manual(values = c("natural killer cell" = "#7640A9",
+                                 "CD8-positive, alpha-beta T cell" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[2],
+                                 hue_pal()(16)) 
+                      )
+```
+
+```{r}
+#| echo: false
+pdf("Li_DLBCL_CELLXGENE_2025_KLRC1_expression_by_broad_TME_celltype_boxplot.pdf",width=12)
+li_klrc1_annot %>%
+    dplyr::filter(diagnosis=="DLBCL") %>%
+    dplyr::select(Cell,KLRC1,sample_id,cell_type) %>%
+    group_by(sample_id,cell_type) %>%
+    summarize(Mean = mean(KLRC1)) %>%
+    ggplot(aes(x = reorder(cell_type,-Mean), y = Mean, fill = cell_type)) +
+    geom_boxplot(outliers = FALSE) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=6)) +
+    guides(fill = "none") +
+    xlab("Cell type") +
+    ylab("Mean KLRC1 expression among DLBCL TME cell types") +
+    scale_fill_manual(values = c("natural killer cell" = "#7640A9",
+                                 "CD8-positive, alpha-beta T cell" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[2],
+                                 hue_pal()(16)) 
+                      )
+dev.off()
+```
+
+## Plot just NK and CD8 T cells
+
+```{r}
+#| fig-width: 12
+li_klrc1_annot %>%
+    dplyr::filter(diagnosis=="DLBCL" & lineage == "TNK" & !str_detect(cellsubset,"CD4")) %>%
+    dplyr::select(Cell,KLRC1,sample_id,cellsubset,cell_type) %>%
+    group_by(sample_id,cellsubset,cell_type) %>%
+    summarize(Mean = mean(KLRC1)) %>%
+    ggplot(aes(x = reorder(cellsubset,-Mean), y = Mean, fill = cellsubset)) +
+    geom_boxplot(outliers = FALSE, width = 0.5) +
+    theme_bw() +
+    ggh4x::facet_grid2(~ cell_type, space = "free_x", scales = "free", independent = "y") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=6)) +
+    theme(panel.grid = element_blank()) +
+    guides(fill = "none") +
+    xlab("Cell type") +
+    ylab("Mean KLRC1 expression among DLBCL TME cell types") +
+    scale_fill_manual(values = c("TNK:NK:C1:NK_CD56bright" = "#420F75", 
+                                 "TNK:NK:C3:NK_Cyc." = "#7640A9", 
+                                 "TNK:NK:C0:NK_CD56dim" = "#AD72D6",
+                                 "TNK:NK:C2:NK_Stem-like" = "#E7A8FB",
+                                 "TNK:CD8T:C1:CD8_Exh" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[1],
+                                 "TNK:CD8T:C2:CD8_Naive/Mem" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[2],
+                                 "TNK:CD8T:C7:CD8_Eff" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[3],
+                                 "TNK:CD8T:C6:CD8_Eff" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[4],
+                                 "TNK:CD8T:C4:CD8_Cyc." = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[5],
+                                 "TNK:CD8T:C3:CD8_Naive" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[6],
+                                 "TNK:CD8T:C5:CD8_Eff/Mem" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[7],
+                                 "TNK:CD8T:C0:CD8_Exh" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[8],
+                                 "TNK:CD8T:C8:CD8_Pre-Exh" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[9]
+                                
+                      )
+    )
+```
+```{r}
+#| echo: false
+pdf("Li_DLBCL_CELLXGENE_2025_KLRC1_T_NK_subsets_boxplot.pdf",width=12)
+li_klrc1_annot %>%
+    dplyr::filter(diagnosis=="DLBCL" & lineage == "TNK" & !str_detect(cellsubset,"CD4")) %>%
+    dplyr::select(Cell,KLRC1,sample_id,cellsubset,cell_type) %>%
+    group_by(sample_id,cellsubset,cell_type) %>%
+    summarize(Mean = mean(KLRC1)) %>%
+    ggplot(aes(x = reorder(cellsubset,-Mean), y = Mean, fill = cellsubset)) +
+    geom_boxplot(outliers = FALSE, width = 0.5) +
+    theme_bw() +
+    ggh4x::facet_grid2(~ cell_type, space = "free_x", scales = "free", independent = "y") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=6)) +
+    theme(panel.grid = element_blank()) +
+    guides(fill = "none") +
+    xlab("Cell type") +
+    ylab("Mean KLRC1 expression among DLBCL TME cell types") +
+    scale_fill_manual(values = c("TNK:NK:C1:NK_CD56bright" = "#420F75", 
+                                 "TNK:NK:C3:NK_Cyc." = "#7640A9", 
+                                 "TNK:NK:C0:NK_CD56dim" = "#AD72D6",
+                                 "TNK:NK:C2:NK_Stem-like" = "#E7A8FB",
+                                 "TNK:CD8T:C1:CD8_Exh" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[1],
+                                 "TNK:CD8T:C2:CD8_Naive/Mem" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[2],
+                                 "TNK:CD8T:C7:CD8_Eff" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[3],
+                                 "TNK:CD8T:C6:CD8_Eff" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[4],
+                                 "TNK:CD8T:C4:CD8_Cyc." = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[5],
+                                 "TNK:CD8T:C3:CD8_Naive" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[6],
+                                 "TNK:CD8T:C5:CD8_Eff/Mem" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[7],
+                                 "TNK:CD8T:C0:CD8_Exh" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[8],
+                                 "TNK:CD8T:C8:CD8_Pre-Exh" = rev(paletteer::paletteer_d("RColorBrewer::Greens"))[9]
+                                
+                      )
+    )
+dev.off()
+```
+
+## Which LymphoMAP type has highest KLRC1 expression?
+
+```{r}
+li_klrc1_annot %>%
+    dplyr::filter(diagnosis=="DLBCL") %>%
+    dplyr::select(Cell,KLRC1,sample_id,LymphoMAP) %>%
+    group_by(sample_id,LymphoMAP) %>%
+    summarize(Mean = mean(KLRC1)) %>%
+    ggplot(aes(x = reorder(LymphoMAP,-Mean), y = Mean, fill = LymphoMAP)) +
+    geom_boxplot(outliers = FALSE) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=6)) +
+    guides(fill = "none") +
+    xlab("LymphoMAP") +
+    ylab("Mean KLRC1 expression among DLBCL cases")
+```
+
+```{r}
+#| echo: false
+pdf("Li_DLBCL_CELLXGENE_2025_KLRC1_expression_lymphomap_subtypes_boxplot.pdf")
+li_klrc1_annot %>%
+    dplyr::filter(diagnosis=="DLBCL") %>%
+    dplyr::select(Cell,KLRC1,sample_id,LymphoMAP) %>%
+    group_by(sample_id,LymphoMAP) %>%
+    summarize(Mean = mean(KLRC1)) %>%
+    ggplot(aes(x = reorder(LymphoMAP,-Mean), y = Mean, fill = LymphoMAP)) +
+    geom_boxplot(outliers = FALSE) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=6)) +
+    guides(fill = "none") +
+    xlab("LymphoMAP") +
+    ylab("Mean KLRC1 expression among DLBCL cases")
+dev.off()
+```
+
+## Is KLRC1 expression different across Control vs ND vs R/R among Control or DLBCL cases
+
+### Prepare metadata
+
+```{r}
+treatment_groups <- s1a %>%
+  dplyr::select(contains("Biopsy Unique ID"),Cohort,Diagnosis,contains("Treatment line received")) %>%
+  bind_rows(s1b %>% dplyr::select(contains("Biopsy Unique ID"),Cohort,Diagnosis,contains("All treatment preceding"),contains("Treatment line received")))
+
+li_klrc1_annot_withTrt <- li_klrc1_annot %>%
+  left_join(treatment_groups,by=c("sample_id" = "Biopsy Unique ID\r\n(patientID-biopsy#)"))
+```
+
+### Plot boxplots of expression, each point is a cell
+
+```{r}
+#| fig-width: 12
+li_klrc1_annot_withTrt %>% 
+  dplyr::filter(lineage == "TNK" & (diagnosis == "Control" | diagnosis == "DLBCL")) %>%
+  ggplot(aes(x = cellsubset,
+           y = KLRC1,
+           fill = cellsubset)) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(position = position_jitter(width = 0.2),size=0.5) +
+  facet_wrap(~Cohort) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=6))
+```
+
+### Count % KLRC1 expressing (% of cells sample\*celltype) and plot by group
+
+```{r}
+li_klrc1_annot_withTrt %>% 
+    dplyr::filter(lineage == "TNK" & (diagnosis == "Control" | diagnosis == "DLBCL")) %>%
+    dplyr::select(Cell,Cohort,cellsubset,KLRC1,sample_id) %>%
+    group_by(sample_id,cellsubset) %>%
+    add_count(name = "NumCells") %>%
+    mutate(prop = sum(KLRC1 > 0)/NumCells) %>%
+    dplyr::select(Cohort,cellsubset,sample_id,NumCells,prop) %>%
+    ungroup() %>%
+    unique() %>%
+    ggplot(aes(x = cellsubset, y = prop, fill = cellsubset)) +
+    geom_boxplot(outlier.shape=NA) +
+    facet_wrap(~Cohort) +
+    theme_bw() +
+    guides(fill = "none") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=6)) +
+    ylab("Proportion of cells with\ndetectable KLRC1 expression")
+
+```
+
+### Look specifically within NK cells and plot ridgeline plots of expression by Cohort and cell type
+
+```{r}
+#| fig-width: 12
+li_klrc1_annot_withTrt %>% 
+    dplyr::filter(str_starts(cellsubset, "TNK:NK") & (diagnosis == "Control" | diagnosis == "DLBCL")) %>%
+    dplyr::select(Cell,Cohort,cellsubset,KLRC1,sample_id) %>%
+    mutate(Cohort = case_when(
+      Cohort == "Control" ~ "rLN",
+      Cohort == "Newly diagnosed" ~ "Untreated DLBCL",
+      Cohort == "Relapsed/refractory" ~ "R/R DLBCL",
+      TRUE ~ "Other"
+      )
+    ) %>%
+    mutate(Cohort = factor(Cohort,levels = rev(c("rLN","Untreated DLBCL","R/R DLBCL")))) %>%
+    mutate(cellsubset = str_replace_all(cellsubset,"TNK:NK:C.:","")) %>%
+    ggplot(aes(x = KLRC1, 
+               y = Cohort,
+               fill = Cohort)) +
+    geom_density_ridges(aes(point_color = Cohort),
+                        scale = 0.75, 
+                        alpha = 0.2,
+                        jittered_points = TRUE, 
+                        position = position_raincloud(height = 0.1)) +
+	  theme_ridges(grid = FALSE, center_axis_labels = TRUE) +
+    facet_grid(~fct_relevel(cellsubset,c("NK_Cyc.",
+                                         "NK_CD56bright",
+                                         "NK_CD56dim",
+                                         "NK_Stem-like"))) +
+    scale_fill_manual(values = rev(c("rLN" = "gray60",
+                                 "Untreated DLBCL" = "#C6DBEF",
+                                 "R/R DLBCL" = "#2171B5"))
+                      ) +
+    scale_discrete_manual(aesthetics = "point_color", values = rev(c("gray60", "#C6DBEF", "#2171B5"))) +
+    xlab("KLRC1 expression") +
+    ylab("Treatment cohort") +
+    theme(axis.line.x = element_line(linewidth = 0.5),
+          axis.text.y = element_text(size = 8, angle = 90, hjust = 0.5, vjust = 0.5))
+  
+```
+
+```{r}
+#| echo: false
+pdf("Li_DLBCL_CELLXGENE_2025_KLRC1_expression_NK_by_diseaseGroup_ridgeline.pdf",width=12)
+li_klrc1_annot_withTrt %>% 
+    dplyr::filter(str_starts(cellsubset, "TNK:NK") & (diagnosis == "Control" | diagnosis == "DLBCL")) %>%
+    dplyr::select(Cell,Cohort,cellsubset,KLRC1,sample_id) %>%
+    mutate(Cohort = case_when(
+      Cohort == "Control" ~ "rLN",
+      Cohort == "Newly diagnosed" ~ "Untreated DLBCL",
+      Cohort == "Relapsed/refractory" ~ "R/R DLBCL",
+      TRUE ~ "Other"
+      )
+    ) %>%
+    mutate(Cohort = factor(Cohort,levels = rev(c("rLN","Untreated DLBCL","R/R DLBCL")))) %>%
+    mutate(cellsubset = str_replace_all(cellsubset,"TNK:NK:C.:","")) %>%
+    ggplot(aes(x = KLRC1, 
+               y = Cohort,
+               fill = Cohort)) +
+    geom_density_ridges(aes(point_color = Cohort),
+                        scale = 0.75, 
+                        alpha = 0.2,
+                        jittered_points = TRUE, 
+                        position = position_raincloud(height = 0.1)) +
+	  theme_ridges(grid = FALSE, center_axis_labels = TRUE) +
+    facet_grid(~fct_relevel(cellsubset,c("NK_Cyc.",
+                                         "NK_CD56bright",
+                                         "NK_CD56dim",
+                                         "NK_Stem-like"))) +
+    scale_fill_manual(values = rev(c("rLN" = "gray60",
+                                 "Untreated DLBCL" = "#C6DBEF",
+                                 "R/R DLBCL" = "#2171B5"))
+                      ) +
+    scale_discrete_manual(aesthetics = "point_color", values = rev(c("gray60", "#C6DBEF", "#2171B5"))) +
+    xlab("KLRC1 expression") +
+    ylab("Treatment cohort") +
+    theme(axis.line.x = element_line(linewidth = 0.5),
+          axis.text.y = element_text(size = 8, angle = 90, hjust = 0.5, vjust = 0.5))
+  
+dev.off()
+
+```
+
+#### Compute stats based on simple wilcoxon test
+```{r}
+klrc1_byCohort <- li_klrc1_annot_withTrt %>% 
+    dplyr::filter(str_starts(cellsubset, "TNK:NK") & (diagnosis == "Control" | diagnosis == "DLBCL")) %>%
+    dplyr::select(Cell,Cohort,cellsubset,KLRC1,sample_id) %>%
+    mutate(Cohort = case_when(
+      Cohort == "Control" ~ "rLN",
+      Cohort == "Newly diagnosed" ~ "Untreated DLBCL",
+      Cohort == "Relapsed/refractory" ~ "R/R DLBCL",
+      TRUE ~ "Other"
+      )
+    ) %>%
+    mutate(Cohort = factor(Cohort,levels = rev(c("rLN","Untreated DLBCL","R/R DLBCL")))) %>%
+    mutate(cellsubset = str_replace_all(cellsubset,"TNK:NK:C.:",""))
+
+subsets <- unique(klrc1_byCohort$cellsubset)
+cohorts <- unique(klrc1_byCohort$Cohort)
+
+for(i in subsets) {
+  cells.untreated <- klrc1_byCohort$KLRC1[klrc1_byCohort$cellsubset==i & klrc1_byCohort$Cohort=="Untreated DLBCL"]
+  cells.rr <- klrc1_byCohort$KLRC1[klrc1_byCohort$cellsubset==i & klrc1_byCohort$Cohort=="R/R DLBCL"]
+  cells.rln <- klrc1_byCohort$KLRC1[klrc1_byCohort$cellsubset==i & klrc1_byCohort$Cohort=="rLN"]
+  print(paste0(i,": MeanUntreated: ",mean(cells.untreated), "; MeanRR: ",mean(cells.rr), "; MeanRLN: ",mean(cells.rln)))
+  w1 <- wilcox.test(cells.untreated,cells.rln)
+  w2 <- wilcox.test(cells.rr,cells.rln)
+  w3 <- wilcox.test(cells.untreated,cells.rr)
+  print(paste0(i,": ",w1$data.name," p = ",w1$p.value))
+  print(paste0(i,": ",w2$data.name," p = ",w2$p.value))
+  print(paste0(i,": ",w3$data.name," p = ",w3$p.value))
+}
+
+```
+
+
+### Repeat for all NK cells in one facet and plot ridgeline plots of expression colored by Cohort
+
+Note including all T/NK has too many cells with 0 expression so distributions are too 0-skewed to be meaningful
+
+```{r}
+#| fig-width: 12
+li_klrc1_annot_withTrt %>% 
+    dplyr::filter(str_starts(cellsubset, "TNK:NK") & (diagnosis == "Control" | diagnosis == "DLBCL")) %>%
+    dplyr::select(Cell,Cohort,cellsubset,KLRC1,sample_id) %>%
+    ggplot(aes(x = KLRC1, y = Cohort, fill = Cohort)) +
+    geom_density_ridges(aes(point_color = Cohort),
+                        scale = 1, 
+                        alpha = 0.2,
+                        jittered_points = TRUE, 
+                        position = position_raincloud(height = 0.1)) +
+    theme_ridges(grid = FALSE, center_axis_labels = TRUE)
+
+```
+
+### Repeat for CD8T and plot ridgeline plots of expression by Cohort and cell type
+
+```{r}
+#| fig-width: 18
+li_klrc1_annot_withTrt %>% 
+    dplyr::filter(str_starts(cellsubset, "TNK:CD8T") & (diagnosis == "Control" | diagnosis == "DLBCL")) %>%
+    dplyr::select(Cell,Cohort,cellsubset,KLRC1,sample_id) %>%
+    mutate(Cohort = case_when(
+      Cohort == "Control" ~ "rLN",
+      Cohort == "Newly diagnosed" ~ "Untreated DLBCL",
+      Cohort == "Relapsed/refractory" ~ "R/R DLBCL",
+      TRUE ~ "Other"
+      )
+    ) %>%
+    mutate(Cohort = factor(Cohort,levels = rev(c("rLN","Untreated DLBCL","R/R DLBCL")))) %>%
+    ggplot(aes(x = KLRC1, 
+               y = Cohort,
+               fill = Cohort)) +
+    geom_density_ridges(aes(point_color = Cohort),
+                        scale = 0.75, 
+                        alpha = 0.2,
+                        jittered_points = TRUE, 
+                        position = position_raincloud(height = 0.1)) +
+	  theme_ridges(grid = FALSE, center_axis_labels = TRUE) +
+    facet_grid(~cellsubset) +
+    scale_fill_manual(values = rev(c("rLN" = "gray60",
+                                 "Untreated DLBCL" = "#C6DBEF",
+                                 "R/R DLBCL" = "#2171B5"))
+                      ) +
+    scale_discrete_manual(aesthetics = "point_color", values = rev(c("gray60", "#C6DBEF", "#2171B5"))) +
+    xlab("KLRC1 expression") +
+    ylab("Treatment cohort") +
+    theme(axis.line.x = element_line(linewidth = 0.5),
+          axis.text.y = element_text(size = 8, angle = 90, hjust = 0.5, vjust = 0.5))
+  
+```
+
+## Plot KLRC1 among just the NK/T lineage
+
+```{r}
+DimPlot(li_dlbcl,
+        cells = li_klrc1_annot_withTrt %>% 
+                      dplyr::filter(lineage ==  "TNK") %>%
+                      pull(Cell),
+        group.by = "cell_type",
+        label = TRUE
+)
+
+FeaturePlot(li_dlbcl,
+            cells = li_klrc1_annot_withTrt %>% 
+                      dplyr::filter(lineage ==  "TNK") %>%
+                      pull(Cell),
+            features = get_id("KLRC1", 
+                              meta_tbl = feature_meta,
+                              id_col = "id",
+                              sym_col = "gene_symbols"),
+            order = TRUE)
+
+```
+
+## Plot KLRC1 as a dotplot among all clusters alongside TEX genes
+
+```{r}
+#| fig-height: 4
+#| fig-width: 10
+genes <- c("KLRC1", "PDCD1", "TIGIT", "LAG3", "HAVCR2", "CTLA4", "TOX")
+ids <- NULL
+for(i in genes){
+  j <- get_id(i,meta_tbl = feature_meta,id_col = "id",sym_col = "gene_symbols")
+  ids <- c(ids,j)
+}
+
+DotPlot(subset(li_dlbcl,subset = lineage == "TNK" & !str_detect(li_dlbcl$cellsubset,"CD4")),
+        features = ids,
+        group.by = "cellsubset",
+        cols = c("blue","red"),
+        cluster.idents = TRUE) + 
+  RotatedAxis() +
+  theme(axis.text.x = element_text(size = 4)) +
+  scale_x_discrete(labels = genes) +
+  coord_flip()
+```
+
+## Plot KLRC1 as a dotplot among all clusters alongside TEX genes, just DLBCL cases
+
+```{r}
+#| fig-height: 4
+#| fig-width: 10
+DotPlot(subset(li_dlbcl,subset = lineage == "TNK" & !str_detect(li_dlbcl$cellsubset,"CD4") & diagnosis == "DLBCL"),
+        features = ids,
+        group.by = "cellsubset",
+        cols = c("blue","red"),
+        cluster.idents = TRUE) + 
+  RotatedAxis() +
+  theme(axis.text.x = element_text(size = 4)) +
+  scale_x_discrete(labels = genes) +
+  coord_flip()
+
+```
+
+## Plot KLRC1 as a dotplot among all CD8 T clusters, split by disease cohort
+
+```{r}
+#| fig-height: 4
+#| fig-width: 7
+li_klrc1_annot_withTrt %>% 
+  dplyr::filter(lineage == "TNK" & (diagnosis == "Control" | diagnosis == "DLBCL")) %>%
+  dplyr::filter(str_detect(cellsubset,"TNK:CD8T")) %>%
+  group_by(cellsubset,Cohort) %>%
+  mutate(cellsubset = str_replace_all(cellsubset,"TNK:CD8T:","")) %>%
+  summarize(Mean = mean(KLRC1,na.rm=TRUE), PercExp = 100*(sum(KLRC1 > 0)/dplyr::n())) %>%
+  mutate(Cohort = case_when(
+      Cohort == "Control" ~ "rLN",
+      Cohort == "Newly diagnosed" ~ "Untreated DLBCL",
+      Cohort == "Relapsed/refractory" ~ "R/R DLBCL",
+      TRUE ~ "Other"
+      )
+    ) %>%
+  mutate(Cohort = factor(Cohort,levels = rev(c("rLN","Untreated DLBCL","R/R DLBCL")))) %>%
+  ggplot(aes(x = reorder(cellsubset,-Mean), y = Cohort, color = Mean, size = PercExp)) +
+  geom_point() +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_color_gradient(low = "gray90", high = "red",limits=c(0,0.25),oob = scales::squish) +
+  xlab("CD8 T cell subset") +
+  ylab("Treatment cohort")
+  
+
+```
+```{r}
+#| echo: false
+pdf("Li_DLBCL_CELLXGENE_2025_KLRC1_dotplot_CD8T_diseaseGroup.pdf",height=5,width=6)
+li_klrc1_annot_withTrt %>% 
+  dplyr::filter(lineage == "TNK" & (diagnosis == "Control" | diagnosis == "DLBCL")) %>%
+  dplyr::filter(str_detect(cellsubset,"TNK:CD8T")) %>%
+  group_by(cellsubset,Cohort) %>%
+  mutate(cellsubset = str_replace_all(cellsubset,"TNK:CD8T:","")) %>%
+  summarize(Mean = mean(KLRC1,na.rm=TRUE), PercExp = 100*(sum(KLRC1 > 0)/dplyr::n())) %>%
+  mutate(Cohort = case_when(
+      Cohort == "Control" ~ "rLN",
+      Cohort == "Newly diagnosed" ~ "Untreated DLBCL",
+      Cohort == "Relapsed/refractory" ~ "R/R DLBCL",
+      TRUE ~ "Other"
+      )
+    ) %>%
+  mutate(Cohort = factor(Cohort,levels = rev(c("rLN","Untreated DLBCL","R/R DLBCL")))) %>%
+  ggplot(aes(x = reorder(cellsubset,-Mean), y = Cohort, color = Mean, size = PercExp)) +
+  geom_point() +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_color_gradient(low = "gray90", high = "red",limits=c(0,0.25),oob = scales::squish) +
+  xlab("CD8 T cell subset") +
+  ylab("Treatment cohort")
+dev.off()
+```
+## Compute exhaustion score based on Giacomo's signature and plot against KLRC1 expression among CD8T cells, among DLBCL cases
+
+```{r}
+exhausted <- c("PDCD1", "TIGIT", "LAG3", "HAVCR2", "CTLA4", "TOX")
+exhausted_ids = NULL
+for(i in exhausted){
+    id <- get_id(i,meta_tbl = feature_meta,id_col = "id",sym_col = "gene_symbols")
+    exhausted_ids = c(exhausted_ids,id)
+}
+
+li_dlbcl <- AddModuleScore(li_dlbcl,features = list("Exhausted" = exhausted_ids),name="Exhausted")
+
+rownames_to_column(li_dlbcl@meta.data,var="Cell") %>%
+  as_tibble() %>%
+  dplyr::select(Cell,cellsubset,cell_type,disease,diagnosis,Exhausted1) %>%
+  dplyr::filter(str_detect(cellsubset,"CD8T") & diagnosis == "DLBCL") %>%
+  left_join(li_klrc1_annot_withTrt,by=c("Cell","cellsubset","cell_type","disease")) %>%
+  dplyr::select(Cell,cellsubset,cell_type,disease,Cohort,KLRC1,Exhausted1) %>%
+  ggplot(aes(x = Exhausted1, y = KLRC1, color = Cohort)) +
+  geom_point(size=0.5) +
+  theme_bw() +
+  facet_wrap(~Cohort)
+```
+
+## Compute differential expression between KLRC1+ and KLRC1- cells, then plot as volcano and label genes of interest
+
+### CD8
+
+```{r}
+cd8_subset_dlbcl <- subset(cd8_subset, subset = diagnosis=="DLBCL")
+KLRC1_id <- get_id("KLRC1",
+                   meta_tbl = feature_meta,
+                   id_col = "id",
+                   sym_col = "gene_symbols")
+KLRC1_id
+
+cd8_poscells <- WhichCells(cd8_subset_dlbcl, expression = ENSG00000134545 > 0)
+cd8_subset_dlbcl$KLRC1_exp <- ifelse(colnames(cd8_subset_dlbcl) %in% cd8_poscells, "Positive", "Negative")
+
+cd8_klrc1_de <- FindMarkers(cd8_subset_dlbcl,
+                            group.by = "KLRC1_exp",
+                            ident.1 = "Positive")
+
+genes_to_label <- c("KLRC1","KLRC2","KLRF1","KLRC3","KIR2DL4","KLRD1","GNLY","KLRC4","KLRB1","GZMB","PRF1","IFNG","NKG7","ENTPD1","LAG3","HAVCR2","TNFRSF9","CTLA4","ITGAE")
+
+rownames_to_column(cd8_klrc1_de,var="gene") %>%
+  as_tibble() %>%
+  left_join(feature_meta %>% dplyr::select(id,gene_symbols),by=c("gene" = "id")) %>%
+  mutate(TEX = case_when(
+    gene_symbols %in% exhausted ~ "TEX",
+    TRUE ~ "NonTEX"
+    )
+  ) %>%
+  rowwise() %>%
+  mutate(Significance = case_when(
+    p_val_adj < 0.05 ~ "p < 0.05",
+    TRUE ~ "p >= 0.05"
+    )
+  ) %>%
+  mutate(LogP = ifelse(p_val_adj > 0, -log10(p_val_adj), 305)) %>%
+  ungroup() %>%
+#  dplyr::filter(gene_symbols != "KLRC1") %>%
+  ggplot(aes(x = avg_log2FC, y = LogP, color = Significance, label = gene_symbols)) +
+  geom_point(size=0.5) +
+  geom_vline(xintercept = 0, linetype = 2,col="red", alpha=0.5) +
+  geom_hline(yintercept = -log10(0.05),linetype = 2) +
+  theme_bw() +
+  xlab("KLRC1+ vs KLRC1- log2 fold-change, CD8 T cells") +
+  ylab("-log10 adj. p-value") +
+  geom_text_repel(data = rownames_to_column(cd8_klrc1_de,var="gene") %>%
+                    as_tibble() %>%
+                    left_join(feature_meta %>% dplyr::select(id,gene_symbols),by=c("gene" = "id")) %>%
+                    mutate(TEX = case_when(
+                      gene_symbols %in% exhausted ~ "TEX",
+                      TRUE ~ "NonTEX"
+                    )
+                    ) %>%
+                    rowwise() %>%
+                    mutate(Significance = case_when(
+                      p_val_adj < 0.05 ~ "p < 0.05",
+                      TRUE ~ "p >= 0.05"
+                    )
+                    ) %>%
+                    mutate(LogP = ifelse(p_val_adj > 0, -log10(p_val_adj), 305)) %>%
+                    ungroup() %>%
+                    dplyr::filter(gene_symbols %in% genes_to_label),
+                   segment.size  = 0.2,
+                   segment.color = "black",
+                   color = "black",
+                   force = 10,
+                   nudge_y = -25,
+                   max.overlaps = 100,
+                   min.segment.length = 0,
+                   show.legend = FALSE
+  )
+
+rownames_to_column(cd8_klrc1_de,var="gene") %>%
+  as_tibble() %>%
+  left_join(feature_meta %>% dplyr::select(id,gene_symbols),by=c("gene" = "id")) %>%
+  write_tsv("CD8_KLRC1_posVSneg_DE.tsv")
+```
+
+```{r}
+#| echo: false
+pdf("Li_DLBCL_CELLXGENE_2025_KLRC1_CD8T_DE_volcano_annotated.pdf",height = 6,width = 8)
+rownames_to_column(cd8_klrc1_de,var="gene") %>%
+  as_tibble() %>%
+  left_join(feature_meta %>% dplyr::select(id,gene_symbols),by=c("gene" = "id")) %>%
+  mutate(TEX = case_when(
+    gene_symbols %in% exhausted ~ "TEX",
+    TRUE ~ "NonTEX"
+    )
+  ) %>%
+  rowwise() %>%
+  mutate(Significance = case_when(
+    p_val_adj < 0.05 ~ "p < 0.05",
+    TRUE ~ "p >= 0.05"
+    )
+  ) %>%
+  mutate(LogP = ifelse(p_val_adj > 0, -log10(p_val_adj), 305)) %>%
+  ungroup() %>%
+#  dplyr::filter(gene_symbols != "KLRC1") %>%
+  ggplot(aes(x = avg_log2FC, y = LogP, color = Significance, label = gene_symbols)) +
+  geom_point(size=0.5) +
+  geom_vline(xintercept = 0, linetype = 2,col="red", alpha=0.5) +
+  geom_hline(yintercept = -log10(0.05),linetype = 2) +
+  theme_bw() +
+  xlab("KLRC1+ vs KLRC1- log2 fold-change, CD8 T cells") +
+  ylab("-log10 adj. p-value") +
+  geom_text_repel(data = rownames_to_column(cd8_klrc1_de,var="gene") %>%
+                    as_tibble() %>%
+                    left_join(feature_meta %>% dplyr::select(id,gene_symbols),by=c("gene" = "id")) %>%
+                    mutate(TEX = case_when(
+                      gene_symbols %in% exhausted ~ "TEX",
+                      TRUE ~ "NonTEX"
+                    )
+                    ) %>%
+                    rowwise() %>%
+                    mutate(Significance = case_when(
+                      p_val_adj < 0.05 ~ "p < 0.05",
+                      TRUE ~ "p >= 0.05"
+                    )
+                    ) %>%
+                    mutate(LogP = ifelse(p_val_adj > 0, -log10(p_val_adj), 305)) %>%
+                    ungroup() %>%
+                    dplyr::filter(gene_symbols %in% genes_to_label),
+                   segment.size  = 0.2,
+                   segment.color = "black",
+                   color = "black",
+                   force = 10,
+                   nudge_y = -25,
+                   max.overlaps = 100,
+                   min.segment.length = 0,
+                   show.legend = FALSE
+  )
+dev.off()
+```
+
+### NK
+
+```{r}
+nk_subset_dlbcl <- subset(nk_subset, subset = diagnosis=="DLBCL")
+nk_poscells <- WhichCells(nk_subset_dlbcl, expression = ENSG00000134545 > 0)
+nk_subset_dlbcl$KLRC1_exp <- ifelse(colnames(nk_subset_dlbcl) %in% nk_poscells, "Positive", "Negative")
+
+nk_klrc1_de <- FindMarkers(nk_subset_dlbcl,
+                            group.by = "KLRC1_exp",
+                            ident.1 = "Positive")
+
+rownames_to_column(nk_klrc1_de,var="gene") %>%
+  as_tibble() %>%
+  left_join(feature_meta %>% dplyr::select(id,gene_symbols),by=c("gene" = "id")) %>%
+  mutate(TEX = case_when(
+    gene_symbols %in% exhausted ~ "TEX",
+    TRUE ~ "NonTEX"
+    )
+  ) %>%
+  rowwise() %>%
+  mutate(Significance = case_when(
+    p_val_adj < 0.05 ~ "p < 0.05",
+    TRUE ~ "p >= 0.05"
+    )
+  ) %>%
+  mutate(LogP = ifelse(p_val_adj > 0, -log10(p_val_adj), 305)) %>%
+  ungroup() %>%
+  dplyr::filter(gene_symbols != "KLRC1") %>%
+  ggplot(aes(x = avg_log2FC, y = LogP, color = Significance, label = gene_symbols)) +
+  geom_point(size=0.5) +
+  geom_vline(xintercept = 0, linetype = 2,col="red", alpha=0.5) +
+  geom_hline(yintercept = -log10(0.05),linetype = 2) +
+  theme_bw() +
+  xlab("KLRC1+ vs KLRC1- log2 fold-change, NK cells") +
+  ylab("-log10 adj. p-value") +
+  geom_text_repel(data = rownames_to_column(nk_klrc1_de,var="gene") %>%
+                    as_tibble() %>%
+                    left_join(feature_meta %>% dplyr::select(id,gene_symbols),by=c("gene" = "id")) %>%
+                    mutate(TEX = case_when(
+                      gene_symbols %in% exhausted ~ "TEX",
+                      TRUE ~ "NonTEX"
+                    )
+                    ) %>%
+                    rowwise() %>%
+                    mutate(Significance = case_when(
+                      p_val_adj < 0.05 ~ "p < 0.05",
+                      TRUE ~ "p >= 0.05"
+                    )
+                    ) %>%
+                    mutate(LogP = ifelse(p_val_adj > 0, -log10(p_val_adj), 305)) %>%
+                    ungroup() %>%
+                    dplyr::filter(gene_symbols != "KLRC1") %>%
+                    dplyr::filter(gene_symbols %in% genes_to_label),
+                   segment.size  = 0.2,
+                   segment.color = "black",
+                   color = "black",
+                   force = 10,
+                   nudge_y = 25,
+                   max.overlaps = 100,
+                   min.segment.length = 0,
+                   show.legend = FALSE
+  )
+
+rownames_to_column(nk_klrc1_de,var="gene") %>%
+  as_tibble() %>%
+  left_join(feature_meta %>% dplyr::select(id,gene_symbols),by=c("gene" = "id")) %>%
+  write_tsv("NK_KLRC1_posVSneg_DE.tsv")
+```
+
+```{r}
+#| echo: false
+pdf("Li_DLBCL_CELLXGENE_2025_KLRC1_NK_DE_volcano_annotated.pdf",height = 6,width = 8)
+rownames_to_column(nk_klrc1_de,var="gene") %>%
+  as_tibble() %>%
+  left_join(feature_meta %>% dplyr::select(id,gene_symbols),by=c("gene" = "id")) %>%
+  mutate(TEX = case_when(
+    gene_symbols %in% exhausted ~ "TEX",
+    TRUE ~ "NonTEX"
+    )
+  ) %>%
+  rowwise() %>%
+  mutate(Significance = case_when(
+    p_val_adj < 0.05 ~ "p < 0.05",
+    TRUE ~ "p >= 0.05"
+    )
+  ) %>%
+  mutate(LogP = ifelse(p_val_adj > 0, -log10(p_val_adj), 305)) %>%
+  ungroup() %>%
+  dplyr::filter(gene_symbols != "KLRC1") %>%
+  ggplot(aes(x = avg_log2FC, y = LogP, color = Significance, label = gene_symbols)) +
+  geom_point(size=0.5) +
+  geom_vline(xintercept = 0, linetype = 2,col="red", alpha=0.5) +
+  geom_hline(yintercept = -log10(0.05),linetype = 2) +
+  theme_bw() +
+  xlab("KLRC1+ vs KLRC1- log2 fold-change, NK cells") +
+  ylab("-log10 adj. p-value") +
+  geom_text_repel(data = rownames_to_column(nk_klrc1_de,var="gene") %>%
+                    as_tibble() %>%
+                    left_join(feature_meta %>% dplyr::select(id,gene_symbols),by=c("gene" = "id")) %>%
+                    mutate(TEX = case_when(
+                      gene_symbols %in% exhausted ~ "TEX",
+                      TRUE ~ "NonTEX"
+                    )
+                    ) %>%
+                    rowwise() %>%
+                    mutate(Significance = case_when(
+                      p_val_adj < 0.05 ~ "p < 0.05",
+                      TRUE ~ "p >= 0.05"
+                    )
+                    ) %>%
+                    mutate(LogP = ifelse(p_val_adj > 0, -log10(p_val_adj), 305)) %>%
+                    ungroup() %>%
+                    dplyr::filter(gene_symbols != "KLRC1") %>%
+                    dplyr::filter(gene_symbols %in% genes_to_label),
+                   segment.size  = 0.2,
+                   segment.color = "black",
+                   color = "black",
+                   force = 10,
+                   nudge_y = 25,
+                   max.overlaps = 100,
+                   min.segment.length = 0,
+                   show.legend = FALSE
+  )
+dev.off()
+```
+
+## Transformed vs non-transformed disease
+
+### Prepare metadata
+
+```{r}
+transformation_groups <- s1a %>%
+  dplyr::select(contains("Biopsy Unique ID"),Cohort,Diagnosis,contains("Transformed or concurrent")) %>%
+  dplyr::rename("TransformedStatus" = `Transformed or concurrent indolent\r\nlymphoma (0 = no, 1 = yes)`) %>%
+  bind_rows(s1b %>% dplyr::select(contains("Biopsy Unique ID"),Cohort,Diagnosis,contains("Transformed or concurrent")) %>% dplyr::rename("TransformedStatus" = `Transformed or concurrent\r\nindolent lymphoma (0 = no, 1 = yes)`))
+
+li_klrc1_annot_withTransf <- li_klrc1_annot %>%
+  left_join(transformation_groups,by=c("sample_id" = "Biopsy Unique ID\r\n(patientID-biopsy#)"))
+```
+
+### Plot boxplots of expression, each point is a cell
+
+```{r}
+#| fig-width: 12
+li_klrc1_annot_withTransf %>% 
+  dplyr::filter(lineage == "TNK" & (diagnosis == "Control" | diagnosis == "DLBCL")) %>%
+  ggplot(aes(x = cellsubset,
+           y = KLRC1,
+           fill = cellsubset)) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(position = position_jitter(width = 0.2),size=0.5) +
+  facet_wrap(~as.factor(TransformedStatus)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=6))
+```
+
+### Look specifically within NK cells and plot ridgeline plots of expression by Transformation group and cell type
+
+```{r}
+#| fig-width: 12
+li_klrc1_annot_withTransf %>% 
+    dplyr::filter(str_starts(cellsubset, "TNK:NK") & (diagnosis == "Control" | diagnosis == "DLBCL")) %>%
+    dplyr::select(Cell,TransformedStatus,cellsubset,KLRC1,sample_id) %>%
+    ggplot(aes(x = KLRC1, y = TransformedStatus, fill = TransformedStatus)) +
+    geom_density_ridges(aes(point_color = TransformedStatus),
+                        scale = 1, 
+                        alpha = 0.2,
+                        jittered_points = TRUE, 
+                        position = position_raincloud(height = 0.1)) +
+    theme_ridges(grid = FALSE, center_axis_labels = TRUE) +
+    facet_grid(~cellsubset)
+
+```
+
+## Site of disease (extranodal site vs non extranodal site)
+
+### Prepare metadata, note extranodal status is among ND patients only
+
+```{r}
+nodal_groups <- s1a %>%
+  dplyr::select(contains("Biopsy Unique ID"),Cohort,Diagnosis,contains("nodal")) %>%
+  dplyr::rename("ExtranodalStatus" = `>1 extranodal site`)
+
+li_klrc1_annot_withNodal <- li_klrc1_annot %>%
+  left_join(nodal_groups,by=c("sample_id" = "Biopsy Unique ID\r\n(patientID-biopsy#)"))
+```
+
+### Plot boxplots of expression, each point is a cell
+
+```{r}
+#| fig-width: 12
+li_klrc1_annot_withNodal %>% 
+  dplyr::filter(lineage == "TNK" & (diagnosis == "Control" | diagnosis == "DLBCL") & Cohort == "Newly diagnosed") %>%
+  ggplot(aes(x = cellsubset,
+           y = KLRC1,
+           fill = cellsubset)) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(position = position_jitter(width = 0.2),size=0.5) +
+  facet_wrap(~as.factor(ExtranodalStatus)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=6))
+```
+
+### Look specifically within NK cells and plot ridgeline plots of expression by Transformation group and cell type
+
+```{r}
+#| fig-width: 12
+li_klrc1_annot_withNodal %>% 
+    dplyr::filter(str_starts(cellsubset, "TNK:NK") & (diagnosis == "Control" | diagnosis == "DLBCL") & Cohort == "Newly diagnosed") %>%
+    dplyr::select(Cell,ExtranodalStatus,cellsubset,KLRC1,sample_id) %>%
+    ggplot(aes(x = KLRC1, y = ExtranodalStatus, fill = ExtranodalStatus)) +
+    geom_density_ridges(aes(point_color = ExtranodalStatus),
+                        scale = 1, 
+                        alpha = 0.2,
+                        jittered_points = TRUE, 
+                        position = position_raincloud(height = 0.1)) +
+    theme_ridges(grid = FALSE, center_axis_labels = TRUE) +
+    facet_grid(~cellsubset)
+
+```
+
+<!-- ### Plot three treatment cohorts separated by pre-biopsy treatment -->
+
+<!-- ```{r} -->
+
+<!-- #| fig-width: 14 -->
+
+<!-- ggplot(data = li_klrc1_annot_withTrt %>% dplyr::filter(lineage == "TNK"), -->
+
+<!--        aes(x = `Treatment line received\r\nimmediately following biopsy`, -->
+
+<!--        y = KLRC1, -->
+
+<!--        fill = `Treatment line received\r\nimmediately following biopsy`)) + -->
+
+<!--   geom_boxplot(outlier.shape=NA) + -->
+
+<!--   geom_point(position = position_jitterdodge(dodge.width = 0.2),size=0.5) + -->
+
+<!--   facet_wrap(~Cohort,scales="free_x") + -->
+
+<!--   guides(fill = "none") + -->
+
+<!--   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=6)) -->
+
+<!-- ``` -->
+
+## Subtype of LBCL (e.g. DLBCL vs DHL)
+
+### Plot all diagnosis types
+
+```{r}
+#| fig-height: 10
+#| fig-width: 12
+ggplot(data = li_klrc1_annot_withTrt %>% 
+         dplyr::filter(lineage == "TNK"),
+       aes(x = cellsubset,
+           y = KLRC1,
+           fill = cellsubset)) +
+    geom_boxplot(outlier.shape=NA) +
+    geom_point(position = position_jitter(width = 0.2),size=0.5) +
+    facet_wrap(~diagnosis) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=6))
+```
+
+### Plot just DLBCL vs DHL
+
+```{r}
+#| fig-width: 10
+ggplot(data = li_klrc1_annot_withTrt %>% 
+         dplyr::filter(lineage == "TNK") %>% 
+         dplyr::filter(diagnosis %in% c("DLBCL","DHL")),
+       aes(x = cellsubset,
+           y = KLRC1,
+           fill = cellsubset)) +
+    geom_boxplot(outlier.shape=NA) +
+    geom_point(position = position_jitter(width = 0.2),size=0.5) +
+    facet_wrap(~diagnosis) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=6))
+```
+
+# Plot expression of HLA-E among all cell types, are macrophages unique?
+
+```{r}
+VlnPlot(li_dlbcl,
+        features = get_id("HLA-E", 
+                              meta_tbl = feature_meta,
+                              id_col = "id",
+                              sym_col = "gene_symbols"),
+        group.by = "cell_type",
+        sort = "increasing",
+        pt.size = 0) + 
+  NoLegend()
+```
+
+# Now only macrophages
+
+```{r}
+VlnPlot(subset(li_dlbcl,subset = cell_type=="macrophage"),
+        features = get_id("HLA-E", 
+                              meta_tbl = feature_meta,
+                              id_col = "id",
+                              sym_col = "gene_symbols"),
+        group.by = "cellsubset",
+        sort = "increasing",
+        pt.size = 0) + 
+  NoLegend()
+```
+
+# Explore HLA-E expression among SPP1+ macrophages
+
+```{r}
+li_hlae <- li_data[get_id("HLA-E", 
+                              meta_tbl = feature_meta,
+                              id_col = "id",
+                              sym_col = "gene_symbols"),]
+
+li_hlae_annot <- enframe(li_hlae,name="Cell",value="HLA-E") %>% 
+  as_tibble() %>%
+  inner_join(rownames_to_column(as.data.frame(li_dlbcl@meta.data),var="Cell") %>%
+        as_tibble(),
+    by = "Cell")
+
+li_hlae_annot_withTrt <- li_hlae_annot %>%
+  left_join(treatment_groups,by=c("sample_id" = "Biopsy Unique ID\r\n(patientID-biopsy#)"))
+
+li_hlae_annot_withTrt %>% 
+    dplyr::filter(str_detect(cellsubset,"SPP1") & (diagnosis == "Control" | diagnosis == "DLBCL")) %>%
+    dplyr::select(Cell,Cohort,cellsubset,`HLA-E`,sample_id) %>%
+    ggplot(aes(x = `HLA-E`, y = Cohort, fill = Cohort)) +
+    geom_density_ridges(aes(point_color = Cohort),
+                        scale=1, 
+                        alpha = 0.2,
+                        jittered_points = TRUE, 
+                        position = position_raincloud(height = 0.1)) +
+    theme_ridges(grid = FALSE, center_axis_labels = TRUE) +
+    facet_grid(~cellsubset)
+```
+
+# Print sessionInfo
+
+```{r}
+sessionInfo()
+```
