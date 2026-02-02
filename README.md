@@ -9,3 +9,19 @@ https://jeremymsimon.github.io/Hahn_DLBCL_HLAE/Li_DLBCL_CELLXGENE_2025_KLRC1_TNK
 
 ## HLA expression, copy number, and SNP analysis and visualization in DLBCL tumors
 https://jeremymsimon.github.io/Hahn_DLBCL_HLAE/Exploration_SEC62_HLA-E_DLBCL2018.html
+
+## Analysis of CRISPR secondary screen data
+### TMD8 cells  
+https://jeremymsimon.github.io/Hahn_DLBCL_HLAE/SecondaryScreen_TMD8_figures_100725.html
+
+### SU-DHL-8 cells  
+https://jeremymsimon.github.io/Hahn_DLBCL_HLAE/SecondaryScreen_SUDHL8_figures_100725.html
+
+### SU-DHL-4 cells  
+https://jeremymsimon.github.io/Hahn_DLBCL_HLAE/SecondaryScreen_SUDHL4_figures_100725.html
+
+### HBL1 cells  
+https://jeremymsimon.github.io/Hahn_DLBCL_HLAE/SecondaryScreen_HBL1_figures_100725.html
+
+### Selection and visualization of top hits
+https://jeremymsimon.github.io/Hahn_DLBCL_HLAE/SecondaryScreen_selectTopHits_Heatmap.html
