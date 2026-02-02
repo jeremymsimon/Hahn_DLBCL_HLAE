@@ -1,0 +1,129 @@
+---
+title: "SEC62 RNA-seq differential expression analysis in HBL1, SUDHL4, TMD8 cells"
+subtitle: "Rendered 12/13/2024"
+author: "Jeremy M. Simon"
+format:
+  html:
+    embed-resources: true
+    toc: true
+editor: visual
+---
+
+# Set up workspace
+```{r }
+#| warning: false
+#| error: false
+
+# Load libraries
+library(DESeq2)
+library(tidyverse)
+
+setwd("/jsimonlab/projects/Wu/Cindy_DLBCL_HLAE/SEC62_RNAseq/SEC62_RNAseq_DESeq2")
+```
+
+# Load transcript to gene lookup table and transcript-level counts from STAR-Salmon workflow
+```{r}
+tx2gene <- read_tsv("/jsimonlab/projects/Wu/Cindy_DLBCL_HLAE/SEC62_RNAseq/SEC62_RNAseq_nextflow/star_salmon/salmon_tx2gene.tsv",col_names=c("tx","gene_id","Gene"))
+
+tx2gene
+
+cts <- read_tsv("/jsimonlab/projects/Wu/Cindy_DLBCL_HLAE/SEC62_RNAseq/SEC62_RNAseq_nextflow/star_salmon/salmon.merged.transcript_counts.tsv")
+
+cts
+```
+
+# Summarize counts to gene symbol
+```{r}
+cts_summarized <- inner_join(tx2gene,cts,by=c("tx","gene_id")) %>%
+	dplyr::select(-tx,-gene_id) %>%
+	pivot_longer(cols=contains("SEC"),names_to="Sample",values_to="Counts") %>%
+	group_by(Gene,Sample) %>%
+	summarize(Expression = round(sum(Counts))) %>%
+	pivot_wider(names_from=Sample,values_from=Expression)
+
+cts_summarized
+```
+
+# Set sample metadata for differential expression testing
+```{r}
+coldata <- enframe(colnames(cts_summarized)[-1],name=NULL) %>%
+	separate(value,c("CellLine","SEC62","Condition","Replicate"),sep="_",remove=F) %>%
+	dplyr::rename("Sample" = value) %>%
+	unite("Genotype",c(SEC62,Condition),sep="_") %>%
+	unite("Condition",c(CellLine,Genotype),sep="_",remove=FALSE) %>%
+	mutate(Genotype = as.factor(Genotype),Replicate = as.factor(Replicate),Condition = as.factor(Condition)) %>%
+	as.data.frame() %>%
+	column_to_rownames(var="Sample")
+
+coldata
+```
+
+# Set up and run DESeq2, model by CellLine_Treatment
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = as.data.frame(cts_summarized), 
+                              colData = coldata, 
+                              design = ~Condition, 
+                              tidy = TRUE)
+
+dds <- DESeq(dds)
+```
+
+# Report results for each cell line separately, comparing SEC62 KO vs control
+```{r}
+res_HBL1 <- lfcShrink(dds,
+                      contrast = c("Condition","HBL1_SEC62_KO","HBL1_SEC62_sgCtl"),
+                      type = "ashr")
+res_SUDHL4 <- lfcShrink(dds,
+                        contrast = c("Condition","SUDHL4_SEC62_KO","SUDHL4_SEC62_sgCtl"),
+                        type = "ashr")
+res_TMD8 <- lfcShrink(dds,
+                      contrast = c("Condition","TMD8_SEC62_KO","TMD8_SEC62_sgCtl"),
+                      type = "ashr")
+```
+
+# Normalize counts by VST
+```{r}
+vsd <- vst(dds)
+```
+
+# Plot PCA of all data colored by metadata
+```{r}
+plotPCA(vsd, intgroup="Condition")
+plotPCA(vsd, intgroup="CellLine")
+plotPCA(vsd, intgroup="Genotype")
+plotPCA(vsd, intgroup="Replicate")
+```
+
+# Write results sorted by padj, add columns for VST-normalized expression of all samples
+## HBL1
+```{r}
+HBL1_ordered <- res_HBL1[order(res_HBL1$padj),]
+HBL1data <- merge(as.data.frame(HBL1_ordered,row.names=rownames(HBL1_ordered)), as.data.frame(assay(vsd)), by="row.names", sort=FALSE)
+rownames(HBL1data) <- HBL1data$Row.names
+HBL1data <- HBL1data[,-1]
+write.table(HBL1data, "SEC62_RNAseq_DESeq2_HBL1_sgSEC62_vs_sgCtl_results.tsv", quote=F, sep="\t", col.names=NA)
+```
+
+## SUDHL4
+```{r}
+SUDHL4_ordered <- res_SUDHL4[order(res_SUDHL4$padj),]
+SUDHL4data <- merge(as.data.frame(SUDHL4_ordered,row.names=rownames(SUDHL4_ordered)), as.data.frame(assay(vsd)), by="row.names", sort=FALSE)
+rownames(SUDHL4data) <- SUDHL4data$Row.names
+SUDHL4data <- SUDHL4data[,-1]
+write.table(SUDHL4data, "SEC62_RNAseq_DESeq2_SUDHL4_sgSEC62_vs_sgCtl_results.tsv", quote=F, sep="\t", col.names=NA)
+```
+
+## TMD8
+```{r}
+TMD8_ordered <- res_TMD8[order(res_TMD8$padj),]
+TMD8data <- merge(as.data.frame(TMD8_ordered,row.names=rownames(TMD8_ordered)), as.data.frame(assay(vsd)), by="row.names", sort=FALSE)
+rownames(TMD8data) <- TMD8data$Row.names
+TMD8data <- TMD8data[,-1]
+write.table(TMD8data, "SEC62_RNAseq_DESeq2_TMD8_sgSEC62_vs_sgCtl_results.tsv", quote=F, sep="\t", col.names=NA)
+```
+
+# Get session info
+```{r}
+sessionInfo()
+```
+
