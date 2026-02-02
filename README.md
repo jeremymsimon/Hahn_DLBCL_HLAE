@@ -2,7 +2,7 @@
 The code in this repository supports data and results presented in Hahn _et al._ 2026, _manuscript in preparation_
 
 ### Roider _et al._ DLBCL scRNA re-analysis:
-https://jeremymsimon.github.io/Hahn_DLBCL_HLAE/seurat.html
+https://jeremymsimon.github.io/Hahn_DLBCL_HLAE/Roider_DLBCL_scRNA_seurat.html
 
 ### Li _et al._ DLBCL scRNA analysis of KLRC1 expression:
 https://jeremymsimon.github.io/Hahn_DLBCL_HLAE/Li_DLBCL_CELLXGENE_2025_KLRC1_TNK_exploration.html
