@@ -1,0 +1,712 @@
+---
+title: "Roider DLBCL scRNA-seq reprocessing"
+subtitle: "Rendered 6/26/2024"
+author: "Jeremy M. Simon"
+format:
+  html:
+    embed-resources: true
+    toc: true
+editor: visual
+---
+
+# Set up Seurat workspace
+
+```{r }
+#| warning: false
+#| error: false
+
+# Load libraries
+library(data.table)
+library(devtools)
+library(presto)					# devtools::install_github('immunogenomics/presto')
+library(glmGamPoi)				# BiocManager::install("glmGamPoi")
+library(sctransform)			# devtools::install_github("satijalab/sctransform", ref = "develop")
+library(Seurat)					# remotes::install_github("satijalab/seurat", "seurat5")
+library(tidyverse)
+library(miQC)					# BiocManager::install("miQC")	
+library(SeuratWrappers)			# remotes::install_github('satijalab/seurat-wrappers')
+library(flexmix)
+library(SingleCellExperiment)
+library(SummarizedExperiment)
+library(readxl)
+library(Matrix)
+library(speckle)
+library(scater)
+library(patchwork)
+library(vctrs)
+library(harmony)
+library(scDblFinder)
+library(ggridges)
+library(scGate)
+library(ggsankey)
+
+# Set working directory
+setwd("/jsimonlab/projects/Wu/Cindy_DLBCL_HLAE/Roider_DLBCL_scRNA")
+
+# Set global options for Seurat v5 objects
+options(Seurat.object.assay.version = 'v5')
+```
+
+# Import 10x data and create Seurat objects with sample names prepended to cell barcodes
+
+```{r}
+#| cache: true
+#| cache-lazy: false
+DLBCL1 <- Read10X("DLBCL1",strip.suffix = T)
+DLBCL2 <- Read10X("DLBCL2",strip.suffix = T)
+DLBCL3 <- Read10X("DLBCL3",strip.suffix = T)
+FL1 <- Read10X("FL1",strip.suffix = T)
+FL2 <- Read10X("FL2",strip.suffix = T)
+FL3 <- Read10X("FL3",strip.suffix = T)
+FL4 <- Read10X("FL4",strip.suffix = T)
+rLN1 <- Read10X("rLN1",strip.suffix = T)
+rLN2 <- Read10X("rLN2",strip.suffix = T)
+rLN3 <- Read10X("rLN3",strip.suffix = T)
+tFL1 <- Read10X("tFL1",strip.suffix = T)
+tFL2 <- Read10X("tFL2",strip.suffix = T)
+
+DLBCL1.seurat <- CreateSeuratObject(counts = DLBCL1)
+DLBCL1.seurat <- RenameCells(DLBCL1.seurat,add.cell.id = "DLBCL1")
+DLBCL2.seurat <- CreateSeuratObject(counts = DLBCL2)
+DLBCL2.seurat <- RenameCells(DLBCL2.seurat,add.cell.id = "DLBCL2")
+DLBCL3.seurat <- CreateSeuratObject(counts = DLBCL3)
+DLBCL3.seurat <- RenameCells(DLBCL3.seurat,add.cell.id = "DLBCL3")
+FL1.seurat <- CreateSeuratObject(counts = FL1)
+FL1.seurat <- RenameCells(FL1.seurat,add.cell.id = "FL1")
+FL2.seurat <- CreateSeuratObject(counts = FL2)
+FL2.seurat <- RenameCells(FL2.seurat,add.cell.id = "FL2")
+FL3.seurat <- CreateSeuratObject(counts = FL3)
+FL3.seurat <- RenameCells(FL3.seurat,add.cell.id = "FL3")
+FL4.seurat <- CreateSeuratObject(counts = FL4)
+FL4.seurat <- RenameCells(FL4.seurat,add.cell.id = "FL4")
+rLN1.seurat <- CreateSeuratObject(counts = rLN1)
+rLN1.seurat <- RenameCells(rLN1.seurat,add.cell.id = "rLN1")
+rLN2.seurat <- CreateSeuratObject(counts = rLN2)
+rLN2.seurat <- RenameCells(rLN2.seurat,add.cell.id = "rLN2")
+rLN3.seurat <- CreateSeuratObject(counts = rLN3)
+rLN3.seurat <- RenameCells(rLN3.seurat,add.cell.id = "rLN3")
+tFL1.seurat <- CreateSeuratObject(counts = tFL1)
+tFL1.seurat <- RenameCells(tFL1.seurat,add.cell.id = "tFL1")
+tFL2.seurat <- CreateSeuratObject(counts = tFL2)
+tFL2.seurat <- RenameCells(tFL2.seurat,add.cell.id = "tFL2")
+```
+
+# Retrieve published cell-cluster metadata
+This is seemingly on a downsampled set of cells, perhaps done so for easier plotting in the shiny app
+```{r}
+download.file("https://github.com/anders-biostat/single-cell-lymphoma-explorer/raw/master/metaInfo.rds", 
+              destfile = "Roider_DLBCL_metaInfo.rds")
+roider.meta <- readRDS("Roider_DLBCL_metaInfo.rds")
+
+head(roider.meta$bcells)
+```
+
+# Merge objects
+
+```{r}
+merged.roider <- merge(x = DLBCL1.seurat, y=c(DLBCL2.seurat, DLBCL3.seurat, FL1.seurat, FL2.seurat, FL3.seurat, FL4.seurat, rLN1.seurat, rLN2.seurat, rLN3.seurat, tFL1.seurat, tFL2.seurat))
+dim(merged.roider)
+```
+
+# QC filter
+
+```{r}
+merged.roider <- subset(merged.roider, subset = nFeature_RNA > 250)
+dim(merged.roider)
+
+merged.roider <- PercentageFeatureSet(merged.roider, pattern = "^MT-", col.name = "percent.mt")
+merged.roider <- RunMiQC(merged.roider, 
+                        percent.mt = "percent.mt", 
+                        nFeature_RNA = "nFeature_RNA", 
+                        posterior.cutoff = 0.7, 
+                        model.slot = "flexmix_model")
+
+merged.roider <- subset(merged.roider, miQC.keep == "keep")
+dim(merged.roider)
+
+data.frame(table(str_replace_all(colnames(merged.roider),"_.+","")))
+
+```
+
+# Add meta data
+
+```{r}
+disease <- str_replace_all(colnames(merged.roider),"\\d_.+","")
+sample <- str_replace_all(colnames(merged.roider),"_.+","")
+
+merged.roider <- AddMetaData(merged.roider,disease,col.name="Disease")
+merged.roider <- AddMetaData(merged.roider,sample,col.name="Sample")
+```
+
+# Join then re-split RNA counts layers by Sample
+
+```{r}
+merged.roider[['RNA']] <- JoinLayers(merged.roider[['RNA']])
+merged.roider[["RNA"]] <- split(merged.roider[["RNA"]], f = merged.roider$Sample)
+```
+
+# Normalize and scale data
+
+Regress out mitochondrial contribution
+
+```{r}
+#| warning: false
+#| error: false
+#| cache: true
+#| cache-lazy: false
+merged.roider <- NormalizeData(merged.roider)
+merged.roider <- FindVariableFeatures(merged.roider, 
+                                    assay="RNA", 
+                                    layer="data", 
+                                    selection.method = "vst", 
+                                    nfeatures = 5000)
+merged.roider <- ScaleData(merged.roider, vars.to.regress = "percent.mt")
+```
+
+# Run PCA
+
+```{r}
+merged.roider <- RunPCA(merged.roider, npcs = 200, verbose = FALSE)
+ElbowPlot(merged.roider, ndims = 200, reduction = "pca")
+```
+
+# Plot unintegrated UMAP
+
+```{r}
+#| fig-width: 12
+merged.roider <- RunUMAP(merged.roider, 
+                        reduction = "pca", 
+                        dims = 1:30, 
+                        reduction.name = "umap.unintegrated")
+DimPlot(merged.roider, reduction = "umap.unintegrated", group.by = c("Disease", "Sample"))
+```
+
+# Call preliminary clusters for the purposes of doublet discrimination
+
+```{r}
+merged.roider <- FindNeighbors(merged.roider, dims = 1:30, reduction = "pca")
+
+merged.roider <- FindClusters(merged.roider, 
+                             resolution = 0.2, 
+                             algorithm = 2)
+
+DimPlot(merged.roider, reduction = "umap.unintegrated", label = T)
+```
+
+# Identify and remove doublets
+
+This uses raw counts as input
+
+## Convert seurat to sce and check colData
+
+```{r}
+# Join RNA layers
+merged.roider[['RNA']] <- JoinLayers(merged.roider[['RNA']])
+
+merged.roider.sce <- as.SingleCellExperiment(merged.roider, assay = "RNA")
+merged.roider.sce
+
+colData(merged.roider.sce)
+```
+
+## Run scDblFinder
+
+Set the `dbr.sd` very high to better allow thresholds to be set based on misclassification rates per sample
+
+```{r}
+#| cache: true
+#| cache-lazy: false
+merged.roider.sce <- scDblFinder(merged.roider.sce,
+                                 samples = "Sample",
+                                 dbr.sd = 1,
+                                 clusters = "seurat_clusters")
+```
+
+## Inspect results
+
+```{r}
+# Look at the classes
+table(merged.roider.sce$seurat_clusters, merged.roider.sce$scDblFinder.class)
+table(merged.roider.sce$Sample, merged.roider.sce$scDblFinder.class)
+
+# Look at the scores
+summary(merged.roider.sce$scDblFinder.score)
+```
+
+## Save doublet classifications into main Seurat object
+
+```{r}
+merged.roider$doublet_classification <- merged.roider.sce$scDblFinder.class
+```
+
+## Count singlets and doublets
+
+```{r}
+table(merged.roider$doublet_classification)
+
+table(merged.roider$doublet_classification, merged.roider$seurat_clusters)
+```
+
+## Plot singlets/doublets in UMAP space
+
+```{r}
+DimPlot(merged.roider,reduction = "umap.unintegrated", group.by = "doublet_classification")
+```
+
+## Subset object to remove doublets and count remaining cells
+
+```{r}
+merged.roider.singlets <- subset(merged.roider, doublet_classification %in% c("singlet"))
+dim(merged.roider.singlets)
+
+# Count remaining cells per initial cluster
+table(merged.roider.singlets$seurat_clusters)
+```
+
+# Set up gating strategy to focus only on B-cell lineage
+
+We gate to remove:
+* CD3+ (T cells)
+* DERL3+/ITM2C+ (Plasma cells)
+
+```{r}
+#| fig-width: 20
+#| fig-height: 10
+
+# Plot genes to be used in gating model
+FeaturePlot(merged.roider.singlets, 
+            features=c("CD79A", "CD79B", 
+                      "MS4A1", "BANK1", 
+                      "CD3E", "CD3D", 
+                      "CD2", "GZMK", 
+                      "DERL3", "ITM2C"), 
+            order = T, 
+            ncol = 5)
+```
+
+# Set up gating model and run scGate
+
+```{r}
+scGate_model <- gating_model(name = "Tcells", 
+                             signature = c("CD3E", "CD3D", 
+                                           "CD2", "GZMK"), 
+                             negative = T,
+                             positive = F,
+                             level = 1
+)
+scGate_model <- gating_model(model = scGate_model,
+                             name = "Plasma", 
+                             signature = c("DERL3", "ITM2C"), 
+                             negative = T,
+                             positive = F,
+                             level = 2
+)
+
+scGate_model <- gating_model(model = scGate_model,
+                             name = "Bcells", 
+                             signature = c("CD79A", "CD79B", 
+                                           "MS4A1", "BANK1"),
+                             positive = T,
+                             negative = F,                             
+                             level = 3
+)
+
+
+merged.roider.singlets <- scGate(data = merged.roider.singlets, 
+                        model = scGate_model, 
+                        pos.thr = 0.25,
+                        neg.thr = 0.15,
+                        verbose = T,
+                        ncores = 4,
+                        pca.dim = 40,
+                        reduction = "umap.unintegrated")
+
+# Visualize "Pure" and "Impure" cells
+DimPlot(merged.roider.singlets, group.by = "is.pure")
+
+# Subset and remove non-B cells
+merged.roider.singlets <-  subset(merged.roider.singlets, is.pure %in% c("Pure"))
+
+dim(merged.roider.singlets)
+```
+
+# Remove cells with very high nCount_RNA values, set other final QC filters
+
+```{r}
+merged.roider.singlets <- subset(merged.roider.singlets,
+                                subset = nCount_RNA < 40000 & nCount_RNA > 500 & nFeature_RNA > 250)
+dim(merged.roider.singlets)
+```
+
+# Re-compute PCA
+
+Re-scale data now that it has been subset
+
+```{r}
+#| warning: false
+#| error: false
+#| cache: true
+#| cache-lazy: false
+merged.roider.singlets[["RNA"]] <- split(merged.roider.singlets[["RNA"]], f = merged.roider.singlets$Sample)
+
+merged.roider.singlets <- FindVariableFeatures(merged.roider.singlets, 
+                                    assay="RNA", 
+                                    layer="data", 
+                                    selection.method = "vst", 
+                                    nfeatures = 5000)
+merged.roider.singlets <- ScaleData(merged.roider.singlets, vars.to.regress = "percent.mt")
+merged.roider.singlets <- RunPCA(merged.roider.singlets, npcs = 200, verbose = FALSE)
+```
+
+# Run Harmony integration
+
+```{r}
+#| cache: true
+#| cache-lazy: false
+integrated.roider <- IntegrateLayers(merged.roider.singlets, 
+                                method = HarmonyIntegration, 
+                                orig.reduction = "pca",
+                                new.reduction = "integrated.harmony"
+)
+```
+
+# Save integrated object
+
+```{r}
+saveRDS(integrated.roider,"Roider_DLBCL_scRNA_singlets_integrated_harmony.rds")
+```
+
+# Identify clusters
+
+```{r}
+integrated.roider <- FindNeighbors(integrated.roider, dims = 1:30, reduction = "integrated.harmony")
+
+integrated.roider <- FindClusters(integrated.roider, 
+                             resolution = seq(0.05,1,0.05), 
+                             algorithm = 2)
+
+integrated.roider <- RunUMAP(integrated.roider,
+                        reduction = "integrated.harmony",
+                        dims = 1:30,
+                        reduction.name = "umap.harmony")
+
+```
+
+# Plot cluster results across range of resolutions
+```{r}
+#| fig-width: 20
+#| fig-height: 12
+DimPlot(integrated.roider,
+        reduction = "umap.harmony", 
+        group.by = paste0("RNA_snn_res.",seq(0.05,1,0.05)), 
+        label = TRUE)
+
+```
+
+
+# Plot clusters and proceed using `res = 0.5` as an example
+
+```{r}
+Idents(integrated.roider) <- integrated.roider$RNA_snn_res.0.5
+integrated.roider$seurat_clusters <- integrated.roider$RNA_snn_res.0.5
+table(integrated.roider$seurat_clusters)
+
+DimPlot(integrated.roider,reduction = "umap.harmony", group.by = "RNA_snn_res.0.5", label = TRUE)
+DimPlot(integrated.roider,reduction = "umap.harmony", group.by = "Disease")
+DimPlot(integrated.roider,reduction = "umap.harmony", group.by = "Sample")
+```
+
+# Plot QC
+
+```{r}
+#| fig-width: 15
+VlnPlot(integrated.roider, features = "nCount_RNA", group.by="seurat_clusters",pt.size=0) + NoLegend()
+VlnPlot(integrated.roider, features = "nFeature_RNA", group.by="seurat_clusters",pt.size=0) + NoLegend()
+VlnPlot(integrated.roider, features = "percent.mt", group.by="seurat_clusters",pt.size=0) + NoLegend()
+```
+
+# Join with published cluster labels
+Note their annotations are provided only on a subset of cells, about 6,000 out of 26,000 total B cells. This means most of our cells have NA for cluster here. We could request cluster labels for all cells from the authors to improve this
+```{r}
+#| fig-width: 12
+overlap <- intersect(rownames(roider.meta$bcells),colnames(integrated.roider))
+length(overlap)
+
+roider.meta.subset <- roider.meta$bcells[overlap,]
+pub.cluster <- roider.meta.subset[colnames(integrated.roider),3]
+integrated.roider <- AddMetaData(integrated.roider, pub.cluster, col.name="roider_clusters")
+
+DimPlot(integrated.roider,
+	group.by = "roider_clusters",
+	reduction = "umap.harmony",
+	cells = overlap
+	) + 
+DimPlot(integrated.roider,
+	group.by = "seurat_clusters",
+	reduction = "umap.harmony",
+	cells = overlap
+	)
+```
+
+# Plot Roider's UMAP coordinates for these overlapping cells but colored by our clusters
+```{r}
+rownames_to_column(roider.meta.subset,var="Cell") %>%
+    as_tibble() %>%
+    inner_join(enframe(integrated.roider$seurat_clusters[overlap]) %>%
+                   dplyr::rename("Cell" = name, "our.cluster" = value),
+               by = "Cell"
+               ) %>%
+    ggplot(aes(x=UMAP1,y=UMAP2,color=our.cluster)) +
+    geom_point(size=0.5) +
+    theme_classic()
+
+```
+
+# Make Sankey plot comparing cluster labels
+```{r}
+#| fig-height: 8
+roider.clusts <- enframe(integrated.roider$roider_clusters[overlap]) %>% 
+    dplyr::rename("Barcode" = name, "Roider.cluster" = value) %>%
+    mutate(Roider.cluster = as.numeric(as.character(Roider.cluster)))
+
+our.clusts <- enframe(integrated.roider$seurat_clusters[overlap]) %>% 
+    dplyr::rename("Barcode" = name, "our.cluster" = value) %>%
+    mutate(our.cluster = as.numeric(as.character(our.cluster)))
+
+
+make_long (
+    full_join(roider.clusts,our.clusts,by="Barcode"),
+    Roider.cluster,our.cluster) %>%
+    ggplot(aes(x = x, 
+        next_x = next_x, 
+        node = node, 
+        next_node = next_node,
+        fill = factor(node),
+        label = node)) +
+        geom_sankey() +
+        theme_sankey(base_size = 18) +
+        theme(legend.position = "none") +
+        xlab("") +
+        geom_sankey_text(size = 3, color = "black") +
+        scale_x_discrete(breaks = c("Roider.cluster","our.cluster"),labels = c("Roider clusters","Our clusters"))
+
+```
+
+
+# Identify cursory marker genes of each cluster at this resolution
+
+```{r}
+integrated.roider[['RNA']] <- JoinLayers(integrated.roider[['RNA']])
+DefaultAssay(integrated.roider) <- "RNA"
+
+vargenes <- presto::wilcoxauc(integrated.roider, 'seurat_clusters', seurat_assay = 'RNA')
+top_vargenes <- top_markers(vargenes, n = 100, auc_min = 0.5, pct_in_min = 20, pct_out_max = 20)
+top_vargenes
+
+write_tsv(top_vargenes,"Roider_DLBCL_scRNA_singlets_integrated_harmony_clustered_prestoMarkers.tsv")
+```
+
+# Plot top markers identified as a dotplot
+
+```{r}
+#| fig-width: 25
+#| fig-height: 5
+top_vargenes <- top_markers(vargenes, n = 5, auc_min = 0.5, pct_in_min = 25, pct_out_max = 10)
+top_markers <- top_vargenes %>%
+        select(-rank) %>% 
+        unclass() %>% 
+        stack() %>%
+        pull(values) %>%
+        unique() %>%
+        .[!is.na(.)]
+
+# Add genes used in B-cell gating above
+top_markers <- unique(c(top_markers,"CD79A","CD79B","MS4A1","BANK1","CD3E","CD2","CD3D","GZMK","DERL3", "ITM2C","CTLA4","TIGIT","LAG3","PRF1","SRGN"))
+
+# Compute aggregated expression values of these genes and cluster them to order the figure
+rna <- AverageExpression(integrated.roider,assay="RNA",slot="data")
+rna.sub <- rna$RNA[top_markers,]
+cors.genes <- as.dist(1-cor(as.matrix(t(rna.sub)),method="pearson"))
+hc.genes <- hclust(cors.genes)
+top_markers.sorted <- rownames(rna.sub)[hc.genes$order]
+
+# Plot
+DotPlot(integrated.roider,features=top_markers.sorted,assay="RNA",cols=c("blue","red"),cluster.idents=T) + RotatedAxis()
+
+```
+
+# Plot proportions per cluster per disease type
+
+```{r}
+#| fig-width: 10
+#| fig-height: 8
+as.data.frame(table(integrated.roider$seurat_clusters, integrated.roider$Sample)) %>% 
+  as_tibble() %>%
+  dplyr::rename("Sample" = Var2,"Cluster" = Var1) %>%
+  tidyr::extract(Sample,into=c("Disease","Patient"),regex="(.+)(\\d)",remove=F) %>%
+  group_by(Sample) %>%
+  mutate(Proportion = Freq / sum(Freq)) %>%
+  ggplot(aes(fill = Disease, x = Disease, y=Proportion)) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(pch = 21, position = position_jitterdodge(jitter.width=0.2)) +
+  facet_wrap(~Cluster,scales="free")
+```
+
+# Compute GCB module score per cell and plot in UMAP space and as dotplot
+
+Derived from HCATonsilData v2 for GCB clusters
+
+```{r}
+combinedGCB <- unique(c("AICDA","MME","RGS13","MEF2B","STMN1","MKI67","PCLAF","NUSAP1","TOP2A","HMGB2","SUGCT","MEF2B","NEIL1","SEC14L1","AICDA","BCL7A","MME","BACH2","TCL1A","CD38","MEF2B","RGS13","SERPINA9","LMO2","HMCES","KLHL6","LRMP","FGD6","MARCKSL1","NEIL1","LMO2","RGS13","MEF2B","BCL2A1","SERPINA9","GMDS","FGD6","RFTN1","PLEK","LRMP","BATF3","MYCBP","NME1","FABP5","PCLAF","MCM7","EBI3","PAICS","PCNA","LMO2"))
+integrated.roider <- AddModuleScore(integrated.roider, features = list(combinedGCB), name = "GCB")
+```
+
+## UMAP
+
+```{r}
+#| fig-width: 12
+FeaturePlot(integrated.roider,  reduction = "umap.harmony",  features = "GCB1", order=T) +
+	FeaturePlot(integrated.roider,  reduction = "umap.harmony",  features = "HLA-E", order=T) +
+	plot_layout(ncol=2)
+
+```
+
+## Dotplot
+
+```{r}
+#| fig-width: 10
+DotPlot(integrated.roider,features=combinedGCB,assay="RNA",cols=c("blue","red"),cluster.idents=T) + RotatedAxis()
+```
+
+## Average GCB scores by cluster and sort
+
+```{r}
+as_tibble(rownames_to_column(integrated.roider@meta.data,var="Cells")) %>%
+	dplyr::select(Cells,seurat_clusters,GCB1) %>%
+	group_by(seurat_clusters) %>%
+	summarize(GCB = mean(GCB1)) %>%
+	dplyr::arrange(desc(GCB))
+
+```
+
+# Plot GCB signature vs HLA-E expression
+
+## Define which clusters were represented \>5% in DLBCL tumors
+
+```{r}
+DLBCLclusters <- as.data.frame(table(integrated.roider$seurat_clusters, integrated.roider$Sample)) %>% 
+    as_tibble() %>%
+    dplyr::rename("Sample" = Var2,"Cluster" = Var1) %>%
+    tidyr::extract(Sample,into=c("Disease","Patient"),regex="(.+)(\\d)",remove=F) %>%
+    group_by(Sample) %>%
+    mutate(Proportion = Freq / sum(Freq)) %>% 
+    group_by(Disease,Cluster) %>% 
+    summarize(Mean = mean(Proportion)) %>% 
+    dplyr::filter(Disease=="DLBCL") %>% 
+    dplyr::filter(Mean > 0.05) %>% 
+    pull(Cluster) %>% 
+    as.character() %>% 
+    as.numeric()
+
+DLBCLclusters
+```
+
+## Plot boxplot of HLA-E expression divided by GCB vs non-GCB cell clusters, each point is a sample
+
+```{r}
+# Get top scoring cluster for GCB signature
+gcb_clust <- as_tibble(rownames_to_column(integrated.roider@meta.data,var="Cells")) %>%
+    dplyr::select(Cells,seurat_clusters,GCB1) %>%
+    group_by(seurat_clusters) %>%
+    summarize(GCB = mean(GCB1)) %>%
+    slice_max(GCB, n = 1) %>%
+    pull(seurat_clusters)
+  
+as_tibble(rownames_to_column(integrated.roider@meta.data,var="Cells")) %>%
+    dplyr::select(Cells,Disease,Sample,seurat_clusters,GCB1) %>%
+    group_by(seurat_clusters,Disease,Sample) %>%
+    left_join(enframe(integrated.roider@assays$RNA$data["HLA-E",],name = "Cells",value = "HLAE") %>% as_tibble(), by="Cells") %>%
+    summarize(GCB = mean(GCB1),HLAE = mean(HLAE)) %>%
+    dplyr::filter(Disease=="DLBCL" & seurat_clusters %in% DLBCLclusters) %>%
+    mutate(CellClass = case_when(
+    	seurat_clusters == gcb_clust ~ "GCB",
+    	T ~ "NonGCB"
+    	)
+    ) %>%
+    ggplot(aes(x=CellClass,y=HLAE,fill=CellClass)) + 
+    geom_boxplot(outlier.shape=NA) +
+    geom_point(pch = 21, position = position_jitterdodge(jitter.width=0.2))
+
+```
+
+## Repeat above but facet by GCB vs non-GCB cells, and separate Disease
+```{r}
+#| fig-width: 10
+as_tibble(rownames_to_column(integrated.roider@meta.data,var="Cells")) %>%
+    dplyr::select(Cells,Disease,Sample,seurat_clusters,GCB1) %>%
+    group_by(seurat_clusters,Disease,Sample) %>%
+    left_join(enframe(integrated.roider@assays$RNA$data["HLA-E",],name = "Cells",value = "HLAE") %>% as_tibble(), by="Cells") %>%
+    summarize(GCB = mean(GCB1),HLAE = mean(HLAE)) %>%
+    mutate(CellClass = case_when(
+        seurat_clusters == gcb_clust ~ "GCB",
+        T ~ "NonGCB"
+    )
+    ) %>%
+    ggplot(aes(x=Disease,y=HLAE,fill=Disease)) +
+    geom_boxplot(outlier.shape=NA) +
+    geom_point(pch = 21, position = position_jitterdodge(jitter.width=0.2)) +
+    facet_wrap(~CellClass)
+```
+
+## Plot scatterplot of GCB signature vs HLA-E expression, colored by GCB vs non-GCB, each point is a cell
+
+```{r}
+as_tibble(rownames_to_column(integrated.roider@meta.data,var="Cells")) %>%
+    dplyr::select(Cells,Disease,Sample,seurat_clusters,GCB1) %>%
+    group_by(seurat_clusters,Disease,Sample) %>%
+    left_join(enframe(integrated.roider@assays$RNA$data["HLA-E",],name = "Cells",value = "HLAE") %>% as_tibble(), by="Cells") %>%
+    dplyr::filter(Disease=="DLBCL" & seurat_clusters %in% DLBCLclusters) %>%
+    mutate(CellClass = case_when(
+        seurat_clusters == gcb_clust ~ "GCB",
+        T ~ "NonGCB"
+    )
+    ) %>%
+    ggplot(aes(x = GCB1, y = HLAE, color = CellClass)) + 
+    geom_point(cex=0.2)
+
+```
+
+## Plot ridgeline showing HLA-E expression divided by GCB vs non-GCB
+
+```{r}
+#| fig-height: 4
+as_tibble(rownames_to_column(integrated.roider@meta.data,var="Cells")) %>%
+    dplyr::select(Cells,Disease,Sample,seurat_clusters,GCB1) %>%
+    group_by(seurat_clusters,Disease,Sample) %>%
+    left_join(enframe(integrated.roider@assays$RNA$data["HLA-E",],name = "Cells",value = "HLAE") %>% as_tibble(), by="Cells") %>%
+    dplyr::filter(Disease=="DLBCL" & seurat_clusters %in% DLBCLclusters) %>%
+    mutate(CellClass = case_when(
+        seurat_clusters == gcb_clust ~ "GCB",
+        T ~ "NonGCB"
+    )
+    ) %>%
+    ggplot(aes(x = HLAE, y = CellClass, fill = CellClass)) + 
+    geom_density_ridges(alpha=0.7) + 
+    scale_x_continuous(expand = c(0, 0)) +
+    scale_y_discrete(expand = c(0, 0)) +
+    coord_cartesian(clip = "off") + 
+    theme_ridges(grid = FALSE, center_axis_labels = TRUE)
+
+```
+
+# Save clustered object
+
+```{r}
+saveRDS(integrated.roider,"Roider_DLBCL_scRNA_singlets_integrated_harmony_clustered.rds")
+```
+
+# Get session info
+
+```{r}
+sessionInfo()
+```
