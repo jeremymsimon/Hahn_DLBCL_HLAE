@@ -1,0 +1,660 @@
+---
+title: "Cindy Secondary Screen Analysis: TMD8"
+subtitle: "Rendered 01/05/2026"
+author: "Jeremy M. Simon"
+format:
+  html:
+    embed-resources: true
+    toc: true
+editor: visual
+---
+
+# Set up workspace
+
+```{r }
+#| warning: false
+#| error: false
+library(tidyverse)
+library(readxl)
+library(tidyHeatmap)
+library(circlize)
+library(ggrepel)
+library(modelr)
+library(paletteer)
+library(ggtext)
+```
+
+# TMD8 cells
+
+## Read in hypergeometric stats results and plot volcano plot based on averaged LFCs and Hypergeometric p-values for all genes
+
+### HLA-E
+
+```{r }
+screen2_tmd8_stats_e <- read_excel("2023-08-04 TMD8 HLA-E Hi Lo Hypergeo.xlsx") %>%
+	dplyr::rename("Gene_Symbol" = `Gene Symbol`, "AverageLFC" = `Average LFC`, "AverageLogP" = `Average -log(p-values)`) %>%
+	dplyr::select(Gene_Symbol,AverageLFC,AverageLogP)
+screen2_tmd8_stats_e
+
+screen2_tmd8_stats_e %>%
+  	mutate(Significance = case_when(
+		AverageLogP >= -log10(0.0005) ~ "p < 0.0005",
+		T ~ "p > 0.0005"
+		)
+	) %>%
+  ggplot(aes(x=AverageLFC,y=AverageLogP,color=Significance)) +
+  geom_point() +
+  xlab("Average log-fold-change HLA-E high vs low") +
+  ylab("Average -log10 hypergeometric p-value")
+```
+
+### HLA-I
+
+```{r}
+screen2_tmd8_stats_abc <- read_excel("2023-08-04 TMD8 HLA-I Hi Lo Hypergeo.xlsx") %>%
+	dplyr::rename("Gene_Symbol" = `Gene Symbol`, "AverageLFC" = `Average LFC`, "AverageLogP" = `Average -log(p-values)`) %>%
+	dplyr::select(Gene_Symbol,AverageLFC,AverageLogP)
+screen2_tmd8_stats_abc
+
+screen2_tmd8_stats_abc %>%
+  	mutate(Significance = case_when(
+		AverageLogP >= -log10(0.0005) ~ "p < 0.0005",
+		T ~ "p > 0.0005"
+		)
+	) %>%
+  ggplot(aes(x=AverageLFC,y=AverageLogP,color=Significance)) +
+  geom_point() +
+  xlab("Average log-fold-change HLA-I high vs low") +
+  ylab("Average -log10 hypergeometric p-value")
+```
+
+## Read in guide level counts and LFCs, compute construct and gene-level Z-scores and p-values relative to non-targeting controls
+
+### HLA-E
+
+```{r }
+tmd8_lfcs_e <- read_csv("2023-08-11_TMD8_HLAE_counts_lfc_gene.csv") %>%
+	dplyr::select(Construct_Barcode,Gene_Symbol,pDNA,contains("ave"),contains("LFC"))
+
+tmd8_lfcs_e_nt <- tmd8_lfcs_e %>%
+  dplyr::filter(str_detect(Gene_Symbol,"INTERGENIC|NO_SITE")) %>%
+  ungroup() %>%
+  summarize(MeanLFC_HiLo = mean(LFC_Hi_Lo),
+            MeanLFC_FLOWp = mean(LFC_input_pDNA),
+            SDLFC_HiLo = sd(LFC_Hi_Lo),
+            SDLFC_FLOWp = sd(LFC_input_pDNA)
+            )
+
+tmd8_e_zscores <- tmd8_lfcs_e %>%
+  dplyr::filter(!str_detect(Gene_Symbol,"INTERGENIC|NO_SITE")) %>%
+  mutate(Z_HILO_HLAE = (LFC_Hi_Lo - tmd8_lfcs_e_nt$MeanLFC_HiLo)/tmd8_lfcs_e_nt$SDLFC_HiLo,
+         Z_FLOWp_HLAE = (LFC_input_pDNA - tmd8_lfcs_e_nt$MeanLFC_FLOWp)/tmd8_lfcs_e_nt$SDLFC_FLOWp
+         ) %>%
+  group_by(Gene_Symbol) %>%
+  mutate(nTargets = n_distinct(Construct_Barcode))
+
+tmd8_e_zscores_genelevel <- tmd8_e_zscores %>%
+  ungroup() %>%
+  dplyr::select(-Construct_Barcode,-LFC_Hi_Lo,-LFC_input_pDNA) %>%
+  group_by(Gene_Symbol) %>%
+  mutate(Z.target.HILO.HLAE = sum(Z_HILO_HLAE)/sqrt(nTargets),
+         Z.target.FLOWp.HLAE = sum(Z_FLOWp_HLAE)/sqrt(nTargets)
+         ) %>%
+  dplyr::select(Gene_Symbol,Z.target.HILO.HLAE,Z.target.FLOWp.HLAE) %>%
+  distinct() %>%
+  ungroup() %>%
+  mutate(P.target.HLAE = 2*pnorm(q=abs(Z.target.HILO.HLAE),lower.tail = F)) %>% 
+  mutate(P.FLOWp.HLAE = 2*pnorm(q=abs(Z.target.FLOWp.HLAE),lower.tail = F)) %>%
+  mutate(P.target.adj.HLAE = p.adjust(P.target.HLAE,method="BH")) %>%
+  mutate(P.FLOWp.adj.HLAE = p.adjust(P.FLOWp.HLAE,method="BH"))
+
+tmd8_e_combined <- full_join(tmd8_e_zscores,tmd8_e_zscores_genelevel,by="Gene_Symbol")
+
+tmd8_e_combined
+```
+
+### HLA-I
+
+```{r }
+tmd8_lfcs_abc <- read_csv("2023-08-11_TMD8_HLAI_counts_lfc_gene.csv") %>%
+	dplyr::select(Construct_Barcode,Gene_Symbol,pDNA,contains("ave"),contains("LFC"))
+
+tmd8_lfcs_abc_nt <- tmd8_lfcs_abc %>%
+  dplyr::filter(str_detect(Gene_Symbol,"INTERGENIC|NO_SITE")) %>%
+  ungroup() %>%
+  summarize(MeanLFC_HiLo = mean(LFC_Hi_Lo),
+            MeanLFC_FLOWp = mean(LFC_input_pDNA),
+            SDLFC_HiLo = sd(LFC_Hi_Lo),
+            SDLFC_FLOWp = sd(LFC_input_pDNA)
+            )
+
+tmd8_abc_zscores <- tmd8_lfcs_abc %>%
+  dplyr::filter(!str_detect(Gene_Symbol,"INTERGENIC|NO_SITE")) %>%
+  mutate(Z_HILO_HLAI = (LFC_Hi_Lo - tmd8_lfcs_abc_nt$MeanLFC_HiLo)/tmd8_lfcs_abc_nt$SDLFC_HiLo,
+         Z_FLOWp_HLAI = (LFC_input_pDNA - tmd8_lfcs_abc_nt$MeanLFC_FLOWp)/tmd8_lfcs_abc_nt$SDLFC_FLOWp
+         ) %>%
+  group_by(Gene_Symbol) %>%
+  mutate(nTargets = n_distinct(Construct_Barcode))
+
+tmd8_abc_zscores_genelevel <- tmd8_abc_zscores %>%
+  ungroup() %>%
+  dplyr::select(-Construct_Barcode,-LFC_Hi_Lo,-LFC_input_pDNA) %>%
+  group_by(Gene_Symbol) %>%
+  mutate(Z.target.HILO.HLAI = sum(Z_HILO_HLAI)/sqrt(nTargets),
+         Z.target.FLOWp.HLAI = sum(Z_FLOWp_HLAI)/sqrt(nTargets)
+         ) %>%
+  dplyr::select(Gene_Symbol,Z.target.HILO.HLAI,Z.target.FLOWp.HLAI) %>%
+  distinct() %>%
+  ungroup() %>%
+  mutate(P.target.HLAI = 2*pnorm(q=abs(Z.target.HILO.HLAI),lower.tail = F)) %>% 
+  mutate(P.FLOWp.HLAI = 2*pnorm(q=abs(Z.target.FLOWp.HLAI),lower.tail = F)) %>%
+  mutate(P.target.adj.HLAI = p.adjust(P.target.HLAI,method="BH")) %>%
+  mutate(P.FLOWp.adj.HLAI = p.adjust(P.FLOWp.HLAI,method="BH"))
+
+tmd8_abc_combined <- full_join(tmd8_abc_zscores,tmd8_abc_zscores_genelevel,by="Gene_Symbol")
+
+tmd8_abc_combined
+```
+
+## Make waterfall plot of rank vs Z-score, colored by significance (Gene level). Label top few genes in each direction
+
+### HLA-E
+
+```{r }
+tmd8_e_combined %>%
+	ungroup() %>%
+  dplyr::select(Gene_Symbol,Z.target.HILO.HLAE,P.target.adj.HLAE) %>% 
+	dplyr::arrange(Z.target.HILO.HLAE) %>%
+  mutate(P.target.adj.HLAE = case_when(
+    P.target.adj.HLAE==0 ~ 1e-300,
+    T ~ P.target.adj.HLAE
+  )) %>%
+  mutate(LogP = -log10(P.target.adj.HLAE)) %>%
+	distinct() %>%
+	mutate(rank = row_number()) %>%
+	mutate(Color = case_when(
+		LogP >= -log10(0.0005) ~ "p < 0.0005",
+		T ~ "p > 0.0005"
+		)
+	) %>%
+	ggplot(aes(x=rank,y=Z.target.HILO.HLAE,fill=as.factor(Color),label=Gene_Symbol)) +
+	geom_col() +
+	theme_classic() +
+	labs(fill="Adj p-value") +
+	geom_label_repel(
+		data = tmd8_e_combined %>%
+		  ungroup() %>%
+		  dplyr::select(Gene_Symbol,Z.target.HILO.HLAE,P.target.adj.HLAE) %>% 
+		  dplyr::arrange(Z.target.HILO.HLAE) %>%
+		  mutate(P.target.adj = case_when(
+		    P.target.adj.HLAE==0 ~ 1e-300,
+		    T ~ P.target.adj.HLAE
+		  )) %>%
+		  mutate(LogP = -log10(P.target.adj.HLAE)) %>%
+		  distinct() %>%
+		  mutate(rank = row_number()) %>%
+		  mutate(Color = case_when(
+		    LogP >= -log10(0.0005) ~ "p < 0.0005",
+		    T ~ "p > 0.0005"
+		  )
+		  ) %>%
+		dplyr::filter(abs(Z.target.HILO.HLAE) > 10 & Color == "p < 0.0005" & (rank <= 10 | rank >= max(rank)-10) ),
+		segment.size  = 0.2,
+		segment.color = "grey50",
+		fill = NA,
+		force = 100,
+		max.overlaps = 100,
+		nudge_x = 100,
+		min.segment.length = 0
+  	) +
+	guides(fill = guide_legend(override.aes = aes(color = NA))) +
+  xlab("Gene rank") +
+  ylab("Gene-level Z-score, HLA-E High vs Low\n relative to non-targeting control")
+```
+
+### HLA-I
+
+```{r }
+tmd8_abc_combined %>%
+	ungroup() %>%
+  dplyr::select(Gene_Symbol,Z.target.HILO.HLAI,P.target.adj.HLAI) %>% 
+	dplyr::arrange(Z.target.HILO.HLAI) %>%
+  mutate(P.target.adj.HLAI = case_when(
+    P.target.adj.HLAI==0 ~ 1e-300,
+    T ~ P.target.adj.HLAI
+  )) %>%
+  mutate(LogP = -log10(P.target.adj.HLAI)) %>%
+	distinct() %>%
+	mutate(rank = row_number()) %>%
+	mutate(Color = case_when(
+		LogP >= -log10(0.0005) ~ "p < 0.0005",
+		T ~ "p > 0.0005"
+		)
+	) %>%
+	ggplot(aes(x=rank,y=Z.target.HILO.HLAI,fill=as.factor(Color),label=Gene_Symbol)) +
+	geom_col() +
+	theme_classic() +
+	labs(fill="Adj p-value") +
+	geom_label_repel(
+		data = tmd8_abc_combined %>%
+		  ungroup() %>%
+		  dplyr::select(Gene_Symbol,Z.target.HILO.HLAI,P.target.adj.HLAI) %>% 
+		  dplyr::arrange(Z.target.HILO.HLAI) %>%
+		  mutate(P.target.adj = case_when(
+		    P.target.adj.HLAI==0 ~ 1e-300,
+		    T ~ P.target.adj.HLAI
+		  )) %>%
+		  mutate(LogP = -log10(P.target.adj.HLAI)) %>%
+		  distinct() %>%
+		  mutate(rank = row_number()) %>%
+		  mutate(Color = case_when(
+		    LogP >= -log10(0.0005) ~ "p < 0.0005",
+		    T ~ "p > 0.0005"
+		  )
+		  ) %>%
+		dplyr::filter(abs(Z.target.HILO.HLAI) > 10 & Color == "p < 0.0005" & (rank <= 10 | rank >= max(rank)-10) ),
+		segment.size  = 0.2,
+		segment.color = "grey50",
+		fill = NA,
+		force = 100,
+		max.overlaps = 100,
+		nudge_x = 100,
+		min.segment.length = 0
+  	) +
+	guides(fill = guide_legend(override.aes = aes(color = NA))) +
+  xlab("Gene rank") +
+  ylab("Gene-level Z-score, HLA-ABC High vs Low\n relative to non-targeting control")
+```
+
+## Make volcano plot of gene-level values (Z-score vs LogP)
+
+### HLA-E
+
+```{r }
+tmd8_e_combined %>%
+	dplyr::select(Gene_Symbol,Z.target.HILO.HLAE,P.target.adj.HLAE) %>% 
+  mutate(P.target.adj.HLAE = case_when(
+		    P.target.adj.HLAE==0 ~ 1e-300,
+		    T ~ P.target.adj.HLAE
+		  )) %>%
+  mutate(LogP = -log10(P.target.adj.HLAE)) %>%
+  dplyr::arrange(Z.target.HILO.HLAE) %>%
+	distinct() %>% 
+	mutate(Significance = case_when(
+		LogP >= -log10(0.0005) ~ "p < 0.0005",
+		LogP < -log10(0.0005) ~ "p > 0.0005"
+		)
+	) %>%
+	ggplot(aes(x=Z.target.HILO.HLAE,y=LogP,color=Significance,label=Gene_Symbol)) +
+	geom_point() +
+	geom_vline(xintercept=0) +
+  geom_label_repel(
+		data = tmd8_e_combined %>%
+	    dplyr::select(Gene_Symbol,Z.target.HILO.HLAE,P.target.adj.HLAE) %>% 
+      mutate(P.target.adj.HLAE = case_when(
+		    P.target.adj.HLAE==0 ~ 1e-300,
+		    T ~ P.target.adj.HLAE
+		  )) %>%
+      mutate(LogP = -log10(P.target.adj.HLAE)) %>%
+      dplyr::arrange(Z.target.HILO.HLAE) %>%
+	    distinct() %>% 
+	    mutate(Significance = case_when(
+		    LogP >= -log10(0.0005) ~ "p < 0.0005",
+		    LogP < -log10(0.0005) ~ "p > 0.0005"
+		    )
+	    ) %>%
+		  dplyr::filter(P.target.adj.HLAE < 0.0005 & Z.target.HILO.HLAE < -30),
+		segment.size  = 0.2,
+		segment.color = "grey50",
+		fill = NA,
+		force = 100,
+		max.overlaps = 100,
+		nudge_x = -20,
+		nudge_y = -10,
+		min.segment.length = 0,
+		show.legend = F
+  	) +
+  xlab("Gene-level Z-score, HLA-E High vs Low\n relative to non-targeting control") +
+  ylab("-log10 adj. p")
+```
+
+### HLA-I
+
+```{r }
+tmd8_abc_combined %>%
+	dplyr::select(Gene_Symbol,Z.target.HILO.HLAI,P.target.adj.HLAI) %>% 
+  mutate(P.target.adj.HLAI = case_when(
+		    P.target.adj.HLAI==0 ~ 1e-300,
+		    T ~ P.target.adj.HLAI
+		  )) %>%
+  mutate(LogP = -log10(P.target.adj.HLAI)) %>%
+  dplyr::arrange(Z.target.HILO.HLAI) %>%
+	distinct() %>% 
+	mutate(Significance = case_when(
+		LogP >= -log10(0.0005) ~ "p < 0.0005",
+		LogP < -log10(0.0005) ~ "p > 0.0005"
+		)
+	) %>%
+	ggplot(aes(x=Z.target.HILO.HLAI,y=LogP,color=Significance,label=Gene_Symbol)) +
+	geom_point() +
+	geom_vline(xintercept=0) +
+  geom_label_repel(
+		data = tmd8_abc_combined %>%
+	    dplyr::select(Gene_Symbol,Z.target.HILO.HLAI,P.target.adj.HLAI) %>% 
+      mutate(P.target.adj.HLAI = case_when(
+		    P.target.adj.HLAI==0 ~ 1e-300,
+		    T ~ P.target.adj.HLAI
+		  )) %>%
+      mutate(LogP = -log10(P.target.adj.HLAI)) %>%
+      dplyr::arrange(Z.target.HILO.HLAI) %>%
+	    distinct() %>% 
+	    mutate(Significance = case_when(
+		    LogP >= -log10(0.0005) ~ "p < 0.0005",
+		    LogP < -log10(0.0005) ~ "p > 0.0005"
+		    )
+	    ) %>%
+		  dplyr::filter(P.target.adj.HLAI < 0.0005 & Z.target.HILO.HLAI < -30),
+		segment.size  = 0.2,
+		segment.color = "grey50",
+		fill = NA,
+		force = 100,
+		max.overlaps = 100,
+		nudge_x = -20,
+		nudge_y = -10,
+		min.segment.length = 0,
+		show.legend = F
+  	) +
+  xlab("Gene-level Z-score, HLA-I High vs Low\n relative to non-targeting control") +
+  ylab("-log10 adj. p")
+```
+
+## Scatterplot of viability vs target enrichment, label putative hits that may be toxic
+
+### HLA-E
+
+```{r }
+tmd8_e_combined %>%
+	dplyr::select(Gene_Symbol,Z.target.HILO.HLAE,Z.target.FLOWp.HLAE,P.target.adj.HLAE,P.FLOWp.adj.HLAE) %>% 
+  ungroup() %>%
+  distinct() %>%
+  mutate(Significance = case_when(
+      P.target.adj.HLAE < 0.05 & P.FLOWp.adj.HLAE < 0.05 ~ "Both p < 0.05",
+      P.target.adj.HLAE < 0.05 & P.FLOWp.adj.HLAE >= 0.05 ~ "Target p < 0.05",
+      T ~ "Other"
+    )
+  ) %>%
+  ggplot(aes(x=Z.target.HILO.HLAE,y=Z.target.FLOWp.HLAE, label=Gene_Symbol,color=Significance)) +
+  geom_point() +
+  	geom_label_repel(
+		data = tmd8_e_combined %>%
+		  dplyr::select(Gene_Symbol,Z.target.HILO.HLAE,Z.target.FLOWp.HLAE,P.target.adj.HLAE,P.FLOWp.adj.HLAE) %>% 
+		  ungroup() %>%
+		  distinct() %>%
+      mutate(Significance = case_when(
+        P.target.adj.HLAE < 0.05 & P.FLOWp.adj.HLAE < 0.05 ~ "Both p < 0.05",
+        P.target.adj.HLAE < 0.05 & P.FLOWp.adj.HLAE >= 0.05 ~ "Target p < 0.05",
+        T ~ "Other"
+        )
+      ) %>%
+		  dplyr::filter((P.FLOWp.adj.HLAE < 0.05 & Z.target.FLOWp.HLAE <= -25) | (Gene_Symbol == "SEC62")),
+		segment.size  = 0.2,
+		segment.color = "grey50",
+		fill = NA,
+		force = 100,
+		max.overlaps = 100,
+		nudge_x = -20,
+		nudge_y = -10,
+		min.segment.length = 0,
+		show.legend = F
+  	) +
+  geom_hline(yintercept = -20, lty = 2) +
+  theme_bw() +
+  xlab("Gene-level Z-score, HLA-E High vs Low\n relative to non-targeting control") +
+  ylab("Gene-level Z-score, Flow-input vs pDNA\n relative to non-targeting control")
+
+
+# Show top few hits significant for HLA-E High vs Low but not for Flow-input vs pDNA
+tmd8_e_combined %>%
+	dplyr::select(Gene_Symbol,Z.target.HILO.HLAE,Z.target.FLOWp.HLAE,P.target.adj.HLAE,P.FLOWp.adj.HLAE) %>% 
+  ungroup() %>%
+  distinct() %>%
+  dplyr::filter(P.target.adj.HLAE < 0.05 & P.FLOWp.adj.HLAE >= 0.05) %>%
+  dplyr::arrange(P.target.adj.HLAE)
+```
+
+```{r}
+#| echo: false
+pdf("SecondaryScreen_TMD8_HLAE_viability_scatterplot.pdf", height = 5, width = 6)
+tmd8_e_combined %>%
+	dplyr::select(Gene_Symbol,Z.target.HILO.HLAE,Z.target.FLOWp.HLAE,P.target.adj.HLAE,P.FLOWp.adj.HLAE) %>% 
+  ungroup() %>%
+  distinct() %>%
+  mutate(Significance = case_when(
+      P.target.adj.HLAE < 0.05 & P.FLOWp.adj.HLAE < 0.05 ~ "Both p < 0.05",
+      P.target.adj.HLAE < 0.05 & P.FLOWp.adj.HLAE >= 0.05 ~ "Target p < 0.05",
+      T ~ "Other"
+    )
+  ) %>%
+  ggplot(aes(x=Z.target.HILO.HLAE,y=Z.target.FLOWp.HLAE, label=Gene_Symbol,color=Significance)) +
+  geom_point() +
+  	geom_label_repel(
+		data = tmd8_e_combined %>%
+		  dplyr::select(Gene_Symbol,Z.target.HILO.HLAE,Z.target.FLOWp.HLAE,P.target.adj.HLAE,P.FLOWp.adj.HLAE) %>% 
+		  ungroup() %>%
+		  distinct() %>%
+      mutate(Significance = case_when(
+        P.target.adj.HLAE < 0.05 & P.FLOWp.adj.HLAE < 0.05 ~ "Both p < 0.05",
+        P.target.adj.HLAE < 0.05 & P.FLOWp.adj.HLAE >= 0.05 ~ "Target p < 0.05",
+        T ~ "Other"
+        )
+      ) %>%
+		  dplyr::filter((P.FLOWp.adj.HLAE < 0.05 & Z.target.FLOWp.HLAE <= -25) | (Gene_Symbol == "SEC62")),
+		segment.size  = 0.2,
+		segment.color = "grey50",
+		fill = NA,
+		force = 100,
+		max.overlaps = 100,
+		nudge_x = -20,
+		nudge_y = -10,
+		min.segment.length = 0,
+		show.legend = F
+  	) +
+  geom_hline(yintercept = -20, lty = 2) +
+  theme_bw() +
+  xlab("Gene-level Z-score, HLA-E High vs Low\n relative to non-targeting control") +
+  ylab("Gene-level Z-score, Flow-input vs pDNA\n relative to non-targeting control")
+
+dev.off()
+```
+
+### HLA-I
+
+```{r }
+tmd8_abc_combined %>%
+	dplyr::select(Gene_Symbol,Z.target.HILO.HLAI,Z.target.FLOWp.HLAI,P.target.adj.HLAI,P.FLOWp.adj.HLAI) %>% 
+  ungroup() %>%
+  distinct() %>%
+  mutate(Significance = case_when(
+      P.target.adj.HLAI < 0.05 & P.FLOWp.adj.HLAI < 0.05 ~ "Both p < 0.05",
+      P.target.adj.HLAI < 0.05 & P.FLOWp.adj.HLAI >= 0.05 ~ "Target p < 0.05",
+      T ~ "Other"
+    )
+  ) %>%
+  ggplot(aes(x=Z.target.HILO.HLAI,y=Z.target.FLOWp.HLAI, label=Gene_Symbol,color=Significance)) +
+  geom_point() +
+  	geom_label_repel(
+		data = tmd8_abc_combined %>%
+		  dplyr::select(Gene_Symbol,Z.target.HILO.HLAI,Z.target.FLOWp.HLAI,P.target.adj.HLAI,P.FLOWp.adj.HLAI) %>% 
+		  ungroup() %>%
+		  distinct() %>%
+      mutate(Significance = case_when(
+        P.target.adj.HLAI < 0.05 & P.FLOWp.adj.HLAI < 0.05 ~ "Both p < 0.05",
+        P.target.adj.HLAI < 0.05 & P.FLOWp.adj.HLAI >= 0.05 ~ "Target p < 0.05",
+        T ~ "Other"
+        )
+      ) %>%
+		  dplyr::filter((P.FLOWp.adj.HLAI < 0.05 & Z.target.FLOWp.HLAI <= -25) | (Gene_Symbol == "SEC62")),
+		segment.size  = 0.2,
+		segment.color = "grey50",
+		fill = NA,
+		force = 100,
+		max.overlaps = 100,
+		nudge_x = -20,
+		nudge_y = -10,
+		min.segment.length = 0,
+		show.legend = F
+  	) +
+  geom_hline(yintercept = -20, lty = 2) +
+  theme_bw() +
+  xlab("Gene-level Z-score, HLA-I High vs Low\n relative to non-targeting control") +
+  ylab("Gene-level Z-score, Flow-input vs pDNA\n relative to non-targeting control")
+
+
+# Show top few hits significant for HLA-I High vs Low but not for Flow-input vs pDNA
+tmd8_abc_combined %>%
+	dplyr::select(Gene_Symbol,Z.target.HILO.HLAI,Z.target.FLOWp.HLAI,P.target.adj.HLAI,P.FLOWp.adj.HLAI) %>% 
+  ungroup() %>%
+  distinct() %>%
+  dplyr::filter(P.target.adj.HLAI < 0.05 & P.FLOWp.adj.HLAI >= 0.05) %>%
+  dplyr::arrange(P.target.adj.HLAI)
+```
+
+## Merge HLA-E and HLA-I
+
+```{r}
+tmd8_combined <- tmd8_e_combined %>%
+  dplyr::select(Construct_Barcode,Gene_Symbol,Z_HILO_HLAE,Z_FLOWp_HLAE,Z.target.HILO.HLAE,Z.target.FLOWp.HLAE,P.target.adj.HLAE,P.FLOWp.adj.HLAE) %>%
+  inner_join(tmd8_abc_combined %>% 
+               dplyr::select(Construct_Barcode,Gene_Symbol,Z_HILO_HLAI,Z_FLOWp_HLAI,Z.target.HILO.HLAI,Z.target.FLOWp.HLAI,P.target.adj.HLAI,P.FLOWp.adj.HLAI),
+             by=c("Construct_Barcode","Gene_Symbol")
+               )
+```
+
+## Find genes whose effect is skewed towards HLA-E relative to HLA-I
+Compute updated specificity score
+
+```{r}
+geometric.mean <- function(x, na.rm = TRUE) { 
+  exp(mean(log(x),na.rm = na.rm)) 
+}
+
+tmd8_combined_genelevel <- tmd8_combined %>%
+  dplyr::select(Gene_Symbol,contains("target"),P.FLOWp.adj.HLAE) %>%
+  distinct() %>%
+  rowwise() %>%
+  mutate(
+    HLAE_specificity = case_when(
+      Z.target.HILO.HLAI >= 0 & Z.target.HILO.HLAE < 0 ~ abs(Z.target.HILO.HLAE),
+      Z.target.HILO.HLAI < 0 & Z.target.HILO.HLAE < 0 ~ abs(Z.target.HILO.HLAE) - geometric.mean(c(abs(Z.target.HILO.HLAE),abs(Z.target.HILO.HLAI))),
+      TRUE ~ 0
+    )
+  ) %>%
+  ungroup() %>%
+  arrange(-HLAE_specificity)
+
+tmd8_combined_genelevel %>%
+  dplyr::select(Gene_Symbol,HLAE_specificity) 
+
+tmd8_combined_genelevel %>%
+  ggplot(aes(x=Z.target.HILO.HLAE,y=Z.target.HILO.HLAI,label=Gene_Symbol,fill=HLAE_specificity)) +
+  geom_point(color="gray50",pch=21,stroke=0.25) +
+  geom_abline(slope=1, intercept=0, linewidth = 0.5) +
+  geom_hline(yintercept = 0, linewidth = 0.25, linetype = 2, color="gray50") +
+  geom_vline(xintercept = 0, linewidth = 0.25, linetype = 2, color="gray50") +
+  xlab("HLA-E low←  →HLA-E high<br><br>HLA-E High vs Low<br>Z-score") +
+  ylab("<b style='font-size:20pt;'>**TMD8**</b><br>HLA-I High vs Low<br>Z-score<br><br>HLA-I low←  →HLA-I high") +
+   scale_fill_gradient2(low = "gray80",mid = "#ed9899ff",high="#c82426ff",midpoint=25,
+                                      limits = c(0,50),
+                                      oob = scales::squish,
+                                      guide = guide_colorbar(frame.colour = "black",
+                                                             ticks.colour = "black",
+                                                             frame.linewidth = 0.25)) +
+  geom_text_repel(color="black",
+		data = tmd8_combined_genelevel %>%
+		  dplyr::filter(HLAE_specificity > 40 & Z.target.HILO.HLAE < -10),
+		segment.size  = 0.2,
+		segment.color = "grey50",
+		force = 100,
+		max.overlaps = 100,
+		nudge_x = -15,
+		nudge_y = 15,
+		min.segment.length = 0,
+		show.legend = FALSE,
+		fontface = "italic"
+  	) +
+  coord_cartesian(xlim = c(-150,100),ylim=c(-150,100)) +
+  theme_classic() +
+  theme(axis.title = element_markdown(), 
+        legend.title.position = "left",
+        legend.title = element_text(angle=90,vjust=0.5,hjust=0.5)) +
+  labs(fill = "HLA-E specificity")
+```
+
+```{r}
+#| echo: false
+cairo_pdf("SecondaryScreen_TMD8_HLAEvsHLAI_Zscores_specificity.pdf")
+tmd8_combined_genelevel %>%
+  ggplot(aes(x=Z.target.HILO.HLAE,y=Z.target.HILO.HLAI,label=Gene_Symbol,fill=HLAE_specificity)) +
+  geom_point(color="gray50",pch=21,stroke=0.25) +
+  geom_abline(slope=1, intercept=0, linewidth = 0.5) +
+  geom_hline(yintercept = 0, linewidth = 0.25, linetype = 2, color="gray50") +
+  geom_vline(xintercept = 0, linewidth = 0.25, linetype = 2, color="gray50") +
+  xlab("HLA-E low←  →HLA-E high<br><br>HLA-E High vs Low<br>Z-score") +
+  ylab("<b style='font-size:20pt;'>**TMD8**</b><br>HLA-I High vs Low<br>Z-score<br><br>HLA-I low←  →HLA-I high") +
+   scale_fill_gradient2(low = "gray80",mid = "#ed9899ff",high="#c82426ff",midpoint=25,
+                                      limits = c(0,50),
+                                      oob = scales::squish,
+                                      guide = guide_colorbar(frame.colour = "black",
+                                                             ticks.colour = "black",
+                                                             frame.linewidth = 0.25)) +
+  geom_text_repel(color="black",
+		data = tmd8_combined_genelevel %>%
+		  dplyr::filter(HLAE_specificity > 40 & Z.target.HILO.HLAE < -10),
+		segment.size  = 0.2,
+		segment.color = "grey50",
+		force = 100,
+		max.overlaps = 100,
+		nudge_x = -15,
+		nudge_y = 15,
+		min.segment.length = 0,
+		show.legend = FALSE,
+		fontface = "italic"
+  	) +
+  coord_cartesian(xlim = c(-150,100),ylim=c(-150,100)) +
+  theme_classic() +
+  theme(axis.title = element_markdown(), 
+        legend.title.position = "left",
+        legend.title = element_text(angle=90,vjust=0.5,hjust=0.5)) +
+  labs(fill = "HLA-E specificity")
+dev.off()
+```
+
+## Add gene-level hypergeometric stats to table and write results
+
+Note: gene-level AverageLFC and Z-scores are perfectly correlated with each other
+
+```{r}
+tmd8_results <- tmd8_combined_genelevel %>%
+  inner_join(screen2_tmd8_stats_e,by="Gene_Symbol") %>%
+  dplyr::rename("HypergeoLFC_HLAE" = AverageLFC) %>%
+  dplyr::rename("HypergeoLogP_HLAE" = AverageLogP) %>%
+  inner_join(screen2_tmd8_stats_abc,by="Gene_Symbol") %>%
+  dplyr::rename("HypergeoLFC_HLAI" = AverageLFC) %>%
+  dplyr::rename("HypergeoLogP_HLAI" = AverageLogP)
+  
+tmd8_results
+
+write_tsv(tmd8_results,file="SecondaryScreen_TMD8_geneLevel_compiledResults_122225.tsv")
+```
+
+## Save session
+
+```{r}
+save.image("SecondaryScreen_TMD8_analysis_122225.RData")
+```
+
+## Get session info
+
+```{r}
+sessionInfo()
+```

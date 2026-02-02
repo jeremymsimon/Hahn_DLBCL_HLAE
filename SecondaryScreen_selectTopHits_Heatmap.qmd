@@ -1,0 +1,574 @@
+---
+title: "Cindy Secondary Screen Analysis: Plot heatmap and select top hits"
+subtitle: "Rendered 12/30/2025"
+author: "Jeremy M. Simon"
+format:
+  html:
+    embed-resources: true
+    toc: true
+editor: visual
+theme: cosmo
+---
+
+# Set up workspace
+
+```{r }
+#| warning: false
+#| error: false
+library(tidyverse)
+library(ComplexHeatmap)
+library(circlize)
+library(depmap)
+library(readxl)
+```
+
+# Load DepMap data
+
+```{r}
+# Print which DepMap release we are working with
+depmap::depmap_release()
+
+# Retrieve data
+depmap_dependency <- depmap::depmap_crispr()
+depmap_meta <- depmap::depmap_metadata()
+```
+
+# Load previously compiled CRISPR screen results
+
+```{r}
+tmd8_results <- read_tsv("SecondaryScreen_TMD8_geneLevel_compiledResults_122225.tsv") %>%
+	add_column("CellLine" = "TMD8")
+sudhl8_results <- read_tsv("SecondaryScreen_SUDHL8_geneLevel_compiledResults_122225.tsv") %>%
+	add_column("CellLine" = "SUDHL8")
+sudhl4_results <- read_tsv("SecondaryScreen_SUDHL4_geneLevel_compiledResults_122225.tsv") %>%
+	add_column("CellLine" = "SUDHL4")
+hbl1_results <- read_tsv("SecondaryScreen_HBL1_geneLevel_compiledResults_122225.tsv") %>%
+	add_column("CellLine" = "HBL1")
+```
+
+# Load supplementary tables corresponding to published HLA-ABC screens
+
+```{r}
+# Burr 2019 Cancer Cell
+burr_2019_hitGenes <- read_excel("~/Desktop/Projects/Wu/Cindy_HLA-E/Screens for integration/2019 Burr Cancer Cell.xlsx", skip = 2) %>%
+  mutate(Gene = str_replace_all(Gene_ID,"#","")) %>%
+  drop_na(LogP) %>%
+  pull(Gene)
+
+# Lee 2022 JCI
+lee_2022_positiveGenes <- read_excel("~/Desktop/Projects/Wu/Cindy_HLA-E/Screens for integration/2022 Lee JCI.xlsx", sheet = 1) %>%
+  dplyr::filter(FDR < 0.05) %>%
+  pull(`Gene Symbol`)
+
+lee_2022_negativeGenes <- read_excel("~/Desktop/Projects/Wu/Cindy_HLA-E/Screens for integration/2022 Lee JCI.xlsx", sheet = 2) %>%
+  dplyr::filter(FDR < 0.05) %>%
+  pull(`Gene Symbol`)
+
+# Chen 2023 Cell
+chen_2023_negativeGenes <- read_excel("~/Desktop/Projects/Wu/Cindy_HLA-E/Screens for integration/2023 Chen Cell.xlsx", sheet = 1) %>%
+  pull(`Gene name`)
+
+chen_2023_positiveGenes <- read_excel("~/Desktop/Projects/Wu/Cindy_HLA-E/Screens for integration/2023 Chen Cell.xlsx", sheet = 2) %>%
+  pull(`Gene name`)
+
+# Dersh 2021 Immunity, experimentally validated hits
+## BJAB
+dersh_2021_bjab_positiveGenes <- read_excel("~/Desktop/Projects/Wu/Cindy_HLA-E/Screens for integration/Dersh Immunity 2021 VALIDATED.xltx", 
+                                            sheet = 1, 
+                                            skip = 1, 
+                                            col_types = c("guess",
+                                                          rep("skip",7),
+                                                          rep("guess",6),
+                                                          rep("skip",12))
+                                            ) %>%
+  drop_na(`Gene targeted`) %>%
+  drop_na(`STARS p-value`) %>%
+  mutate(`STARS p-value` = as.numeric(str_replace_all(`STARS p-value`,"E","e"))) %>%
+  dplyr::filter(`STARS p-value` < 0.05) %>%
+  pull(`Gene targeted`)
+
+dersh_2021_bjab_negativeGenes <- read_excel("~/Desktop/Projects/Wu/Cindy_HLA-E/Screens for integration/Dersh Immunity 2021 VALIDATED.xltx", 
+                                            sheet = 2, 
+                                            skip = 1, 
+                                            col_types = c("guess",
+                                                          rep("skip",9),
+                                                          rep("guess",4),
+                                                          rep("skip",4))
+                                            )  %>%
+  drop_na(`Gene targeted`) %>%
+  drop_na(`STARS p-value`) %>%
+  mutate(`STARS p-value` = as.numeric(str_replace_all(`STARS p-value`,"E","e"))) %>%
+  dplyr::filter(`STARS p-value` < 0.05) %>%
+  pull(`Gene targeted`)
+
+## SUDHL5
+dersh_2021_sudhl5_positiveGenes <- read_excel("~/Desktop/Projects/Wu/Cindy_HLA-E/Screens for integration/Dersh Immunity 2021 VALIDATED.xltx", 
+                                            sheet = 1, 
+                                            skip = 1, 
+                                            col_types = c("guess",
+                                                          rep("skip",13),
+                                                          rep("guess",6),
+                                                          rep("skip",6))
+                                            ) %>%
+  drop_na(`Gene targeted`) %>%
+  drop_na(`STARS p-value`) %>%
+  mutate(`STARS p-value` = as.numeric(str_replace_all(`STARS p-value`,"E","e"))) %>%
+  dplyr::filter(`STARS p-value` < 0.05) %>%
+  pull(`Gene targeted`)
+
+dersh_2021_sudhl5_negativeGenes <- read_excel("~/Desktop/Projects/Wu/Cindy_HLA-E/Screens for integration/Dersh Immunity 2021 VALIDATED.xltx", 
+                                            sheet = 2, 
+                                            skip = 1, 
+                                            col_types = c("guess",
+                                                          rep("skip",5),
+                                                          rep("guess",4),
+                                                          rep("skip",8))
+                                            )  %>%
+  drop_na(`Gene targeted`) %>%
+  drop_na(`STARS p-value`) %>%
+  mutate(`STARS p-value` = as.numeric(str_replace_all(`STARS p-value`,"E","e"))) %>%
+  dplyr::filter(`STARS p-value` < 0.05) %>%
+  pull(`Gene targeted`)
+
+
+## HBL1
+dersh_2021_hbl1_positiveGenes <- read_excel("~/Desktop/Projects/Wu/Cindy_HLA-E/Screens for integration/Dersh Immunity 2021 VALIDATED.xltx", 
+                                            sheet = 1, 
+                                            skip = 1, 
+                                            col_types = c("guess",
+                                                          rep("skip",1),
+                                                          rep("guess",6),
+                                                          rep("skip",18))
+                                            ) %>%
+  drop_na(`Gene targeted`) %>%
+  drop_na(`STARS p-value`) %>%
+  mutate(`STARS p-value` = as.numeric(str_replace_all(`STARS p-value`,"E","e"))) %>%
+  dplyr::filter(`STARS p-value` < 0.05) %>%
+  pull(`Gene targeted`)
+
+dersh_2021_hbl1_negativeGenes <- read_excel("~/Desktop/Projects/Wu/Cindy_HLA-E/Screens for integration/Dersh Immunity 2021 VALIDATED.xltx", 
+                                            sheet = 2, 
+                                            skip = 1, 
+                                            col_types = c("guess",
+                                                          rep("skip",1),
+                                                          rep("guess",4),
+                                                          rep("skip",12))
+                                            )  %>%
+  drop_na(`Gene targeted`) %>%
+  drop_na(`STARS p-value`) %>%
+  mutate(`STARS p-value` = as.numeric(str_replace_all(`STARS p-value`,"E","e"))) %>%
+  dplyr::filter(`STARS p-value` < 0.05) %>%
+  pull(`Gene targeted`)
+
+
+## TMD8
+dersh_2021_tmd8_positiveGenes <- read_excel("~/Desktop/Projects/Wu/Cindy_HLA-E/Screens for integration/Dersh Immunity 2021 VALIDATED.xltx", 
+                                            sheet = 1, 
+                                            skip = 1, 
+                                            col_types = c("guess",
+                                                          rep("skip",19),
+                                                          rep("guess",6),
+                                                          rep("skip",0))
+                                            ) %>%
+  drop_na(`Gene targeted`) %>%
+  drop_na(`STARS p-value`) %>%
+  mutate(`STARS p-value` = as.numeric(str_replace_all(`STARS p-value`,"E","e"))) %>%
+  dplyr::filter(`STARS p-value` < 0.05) %>%
+  pull(`Gene targeted`)
+
+dersh_2021_tmd8_negativeGenes <- read_excel("~/Desktop/Projects/Wu/Cindy_HLA-E/Screens for integration/Dersh Immunity 2021 VALIDATED.xltx", 
+                                            sheet = 2, 
+                                            skip = 1, 
+                                            col_types = c("guess",
+                                                          rep("skip",13),
+                                                          rep("guess",4),
+                                                          rep("skip",0))
+                                            )  %>%
+  drop_na(`Gene targeted`) %>%
+  drop_na(`STARS p-value`) %>%
+  mutate(`STARS p-value` = as.numeric(str_replace_all(`STARS p-value`,"E","e"))) %>%
+  dplyr::filter(`STARS p-value` < 0.05) %>%
+  pull(`Gene targeted`)
+
+```
+
+# Load list of previously reported essential genes
+```{r}
+essentials <- read_excel("Hahn_20221026_essentials.xlsx")
+```
+
+# Prepare data matrices for plotting
+
+## Create matrix of HLA-E Z-scores for each cell line
+
+```{r}
+z_hlae_mat <- bind_rows(tmd8_results,sudhl4_results,sudhl8_results,hbl1_results) %>%
+    dplyr::select(Gene_Symbol,Z.target.HILO.HLAE,CellLine) %>%
+    pivot_wider(names_from=CellLine,values_from=Z.target.HILO.HLAE) %>%
+    column_to_rownames(var="Gene_Symbol") %>%
+    as.data.frame() %>%
+    as.matrix()
+
+head(z_hlae_mat)
+```
+
+### Set row and column ordering based on this matrix
+
+```{r}
+row_orders <- names(sort(apply(z_hlae_mat,1,mean)))
+
+h <- ComplexHeatmap::Heatmap(z_hlae_mat,
+	row_order = row_orders,
+	row_names_gp = gpar(fontsize = 6, fontface = "italic"),
+	cluster_rows = FALSE,
+	clustering_distance_columns = "pearson",
+	name = "Z-score",
+	heatmap_legend_param = list(border = TRUE),
+	border = TRUE
+)
+ht <- draw(h)
+col_orders <- colnames(z_hlae_mat)[column_order(ht)]
+```
+
+## Count how many cell lines gene was scored as a significant hit
+
+```{r}
+nSig_mat <- bind_rows(tmd8_results,sudhl4_results,sudhl8_results,hbl1_results) %>%
+    dplyr::select(Gene_Symbol,P.target.adj.HLAE,CellLine) %>%
+    pivot_wider(names_from=CellLine,values_from=P.target.adj.HLAE) %>%
+    rowwise() %>%
+    mutate(nSig = sum(c_across(c(TMD8,SUDHL4,SUDHL8,HBL1)) < 0.05)) %>%
+    dplyr::select(Gene_Symbol, nSig) %>%
+    column_to_rownames(var="Gene_Symbol") %>%
+    as.data.frame() %>%
+    as.matrix()
+head(nSig_mat)
+```
+
+## Count how many cell lines gene was scored as potentially affecting cell viability
+
+```{r}
+viability_mat <- bind_rows(tmd8_results,sudhl4_results,sudhl8_results,hbl1_results) %>%
+    dplyr::select(Gene_Symbol,Z.target.FLOWp.HLAE,P.FLOWp.adj.HLAE,CellLine) %>%
+	  mutate(altered_padj = ifelse(Z.target.FLOWp.HLAE <= -20 & P.FLOWp.adj.HLAE < 0.05, P.FLOWp.adj.HLAE, 1)) %>%
+	  dplyr::select(Gene_Symbol,CellLine,altered_padj) %>%
+    pivot_wider(names_from=CellLine,values_from=altered_padj) %>%
+	  rowwise() %>%
+    mutate(nSig = sum(c_across(c(TMD8,SUDHL4,SUDHL8,HBL1)) < 0.05)) %>%
+    dplyr::select(Gene_Symbol, nSig) %>%
+    column_to_rownames(var="Gene_Symbol") %>%
+    as.data.frame() %>%
+    as.matrix()
+head(viability_mat)
+```
+
+## Create matrix of HLA-E specificity for each cell line
+
+Compute updated specificity score
+
+```{r}
+geometric.mean <- function(x, na.rm = TRUE) { 
+  exp(mean(log(x),na.rm = na.rm)) 
+}
+
+specificity_mat <- bind_rows(tmd8_results,sudhl4_results,sudhl8_results,hbl1_results) %>% 
+  dplyr::select(Gene_Symbol,CellLine,contains("Z.target")) %>% 
+  rowwise() %>% 
+  mutate(
+    HLAE_specificity = case_when(
+      Z.target.HILO.HLAI >= 0 & Z.target.HILO.HLAE < 0 ~ abs(Z.target.HILO.HLAE),
+      Z.target.HILO.HLAI < 0 & Z.target.HILO.HLAE < 0 ~ abs(Z.target.HILO.HLAE) - geometric.mean(c(abs(Z.target.HILO.HLAE),abs(Z.target.HILO.HLAI))),
+      TRUE ~ 0
+    )
+  ) %>%
+  dplyr::select(Gene_Symbol,CellLine,HLAE_specificity) %>% 
+  pivot_wider(names_from=CellLine,values_from=HLAE_specificity) %>%
+  column_to_rownames(var="Gene_Symbol") %>%
+  as.data.frame() %>%
+  as.matrix()
+head(specificity_mat)
+```
+
+## Tabulate DepMap CRISPR dependency data for B-cell lymphoma cell lines
+
+```{r}
+dependency_mat <- depmap_dependency %>%
+	  dplyr::filter(gene_name %in% rownames(z_hlae_mat) & !is.na(cell_line)) %>%
+	  left_join(depmap_meta, by="cell_line") %>%
+	  dplyr::filter(str_detect(Cellosaurus_NCIt_disease,"B-cell lymphoma")) %>%
+	  dplyr::select(cell_line_name,gene_name,dependency,Cellosaurus_NCIt_disease) %>%
+	  group_by(gene_name,Cellosaurus_NCIt_disease) %>%
+	  summarize(MedianDependency = median(dependency)) %>%
+	  pivot_wider(names_from=Cellosaurus_NCIt_disease, values_from=MedianDependency) %>%
+	  full_join(enframe(row_orders,name=NULL),by=c("gene_name" = "value")) %>%
+	  column_to_rownames(var="gene_name") %>%
+    as.data.frame() %>%
+    as.matrix()
+head(dependency_mat)
+
+```
+
+## Create matrix summarizing HLA-ABC hits in published studies
+
+```{r}
+hla_class1_hits_mat <- enframe(row_orders,name=NULL,value="Gene") %>%
+    mutate(Burr = case_when(Gene %in% burr_2019_hitGenes ~ 1,
+                           TRUE ~ 0)) %>%
+    mutate(Lee = case_when(Gene %in% lee_2022_negativeGenes | Gene %in% lee_2022_positiveGenes ~ 1,
+                           TRUE ~ 0)) %>%
+    mutate(Chen = case_when(Gene %in% chen_2023_positiveGenes | Gene %in% chen_2023_negativeGenes ~ 1,
+                           TRUE ~ 0)) %>%
+    mutate(Dersh = case_when(Gene %in% dersh_2021_bjab_negativeGenes | 
+                              Gene %in% dersh_2021_bjab_positiveGenes |
+                              Gene %in% dersh_2021_sudhl5_negativeGenes | 
+                              Gene %in% dersh_2021_sudhl5_positiveGenes |
+                              Gene %in% dersh_2021_hbl1_negativeGenes | 
+                              Gene %in% dersh_2021_hbl1_positiveGenes |
+                              Gene %in% dersh_2021_tmd8_negativeGenes |
+                              Gene %in% dersh_2021_tmd8_positiveGenes 
+                               ~ 1,
+                           TRUE ~ 0)) %>%
+    column_to_rownames(var="Gene") %>%
+    as.data.frame() %>%
+    as.matrix()
+head(hla_class1_hits_mat)
+
+write_tsv(rownames_to_column(as.data.frame(hla_class1_hits_mat),var="Gene") %>% as_tibble(),"Tabulated_HLA-ABC_hits_previousStudies.tsv")
+```
+
+# Plot full heatmap of all genes
+
+```{r}
+#| fig-height: 27
+#| fig-width: 12
+
+left_annot <- rowAnnotation(Essentials = ifelse(rownames(z_hlae_mat[row_orders,]) %in% essentials$Gene, 1, 0),
+                            border = TRUE,
+                            col = list(Essentials = c("0" = "white", "1" = "gray50")))
+
+heatmap1 <- ComplexHeatmap::Heatmap(z_hlae_mat[row_orders,],
+	row_order = row_orders,
+	left_annotation = left_annot,
+	row_names_gp = gpar(fontsize = 6, fontface = "italic"),
+	column_names_gp = gpar(fontsize = 6),
+	cluster_rows = FALSE,
+	clustering_distance_columns = "pearson",
+	name = "HLA-E Z-score",
+	column_title = "HLA-E Z-score",
+	heatmap_legend_param = list(border = TRUE),
+	col = circlize::colorRamp2(c(-100,0,100),c("blue","white","red")),
+	border = TRUE
+) +
+
+ComplexHeatmap::Heatmap(nSig_mat[row_orders,],
+	row_order = row_orders,
+	row_names_gp = gpar(fontsize = 6, fontface = "italic"),
+	column_names_gp = gpar(fontsize = 6),
+	cluster_rows = FALSE,
+	column_labels = "Screen hits",
+	column_title = "Num. hits",
+	name = "Number of cell lines\ngene was hit",
+	heatmap_legend_param = list(border = TRUE),
+	col = circlize::colorRamp2(c(1,3,4),c("white","white","purple")),
+	border = TRUE
+) +
+
+ComplexHeatmap::Heatmap(viability_mat[row_orders,],
+	row_order = row_orders,
+	row_names_gp = gpar(fontsize = 6, fontface = "italic"),
+	column_names_gp = gpar(fontsize = 6),
+	cluster_rows = FALSE,
+	column_labels = "Viability",
+	column_title = "Viability",
+	name = "Number of cell lines\nwith affected viability",
+	heatmap_legend_param = list(border = TRUE, at = c(0, 1, 2)),
+	col = circlize::colorRamp2(c(0,2),c("white","green4")),
+	border = TRUE
+) +
+ComplexHeatmap::Heatmap(specificity_mat[row_orders,],
+	row_order = row_orders,
+	column_order = col_orders,
+	row_names_gp = gpar(fontsize = 6, fontface = "italic"),
+	column_names_gp = gpar(fontsize = 6),
+	cluster_rows = FALSE,
+	cluster_columns = FALSE,
+	name = "HLA-E specificity",
+	column_title = "HLA-E specificity",
+	heatmap_legend_param = list(border = TRUE),
+	col = circlize::colorRamp2(c(0,100),c("white","red")),
+	border = TRUE
+) +
+ComplexHeatmap::Heatmap(dependency_mat[row_orders,],
+	row_order = row_orders,
+	row_names_gp = gpar(fontsize = 6, fontface = "italic"),
+	column_names_gp = gpar(fontsize = 6),
+	cluster_rows = FALSE,
+	cluster_columns = FALSE,
+  name = "CRISPR dependency\nDepMap B-cell lymphoma",  ## Note fancy labels to color NA as gray
+	column_title = "CRISPR dependency",
+  heatmap_legend_param = list(border = TRUE, at = c(-2, 0, 0.6), labels = c(-2, 0, NA)),
+  col = circlize::colorRamp2(c(-2, 0, 0.5, 0.6),c("blue","white", "white","gray")),
+	border = TRUE
+) +
+ComplexHeatmap::Heatmap(hla_class1_hits_mat[row_orders,],
+	row_order = row_orders,
+	row_names_gp = gpar(fontsize = 6, fontface = "italic"),
+	column_names_gp = gpar(fontsize = 6),
+	cluster_rows = FALSE,
+	cluster_columns = FALSE,
+	name = "HLA-ABC hit",
+	column_title = "Published HLA-ABC hit",
+	heatmap_legend_param = list(border = TRUE, labels = c("Hit", "No hit")),
+	col = c("white","black"),
+	border = TRUE
+)  
+
+draw(heatmap1)
+```
+
+```{r}
+#| echo: false
+pdf("SecondaryScreen_selectTopHits_Heatmap1.pdf",height=27,width=12)
+draw(heatmap1)
+dev.off()
+```
+
+# Select top hits based on the following criteria
+
+-   Mean HLA-E Z-score \< -30 across all 4 cell lines
+-   Significant padj \< 0.05 in at least 3 of 4 cell lines
+-   No significant padj \< 0.05 for Flow-input vs pDNA in any of the four cell lines
+-   Mean HLA-E specificity score \> 10 across all 4 cell lines
+    -   Note: this is subject to change when I alter statistical test for this
+-   Mean DepMap dependency \> -0.5 across B-cell lymphoma cell lines
+    -   Allow NAs
+-   Not scored as hit against HLA-ABC in any external data
+
+## Make selections and take intersect to create final hit gene list
+
+```{r}
+z_hlae_tophits <- rownames(z_hlae_mat)[which(apply(z_hlae_mat,1,mean) < -30)]
+nSig_tophits <- names(nSig_mat[which(nSig_mat >= 3),])
+viability_tophits <- names(viability_mat[which(viability_mat == 0),])
+specificity_tophits <- rownames(specificity_mat)[which(apply(specificity_mat,1,mean) > 10)]
+dependency_tophits <- rownames(dependency_mat)[which(apply(dependency_mat,1,mean) > -0.5 | is.na(apply(dependency_mat,1,mean)))]
+hla_class1_tophits <- rownames(hla_class1_hits_mat)[which(apply(hla_class1_hits_mat,1,sum) == 0)]
+
+top_genes <- intersect(
+				intersect(
+					intersect(
+						intersect(
+						  intersect(z_hlae_tophits,
+							  nSig_tophits),
+						  viability_tophits),
+					  specificity_tophits),
+				  dependency_tophits),
+			  hla_class1_tophits
+			  )
+  
+top_genes_order <- row_orders[row_orders %in% top_genes]
+
+top_genes_order
+```
+
+# Plot heatmap of top hit genes
+
+```{r}
+#| fig-width: 12
+
+left_annot <- rowAnnotation(Essentials = ifelse(rownames(z_hlae_mat[top_genes_order,]) %in% essentials$Gene, 1, 0),
+                            border = TRUE,
+                            col = list(Essentials = c("0" = "white", "1" = "gray50")))
+
+heatmap2 <- ComplexHeatmap::Heatmap(z_hlae_mat[top_genes_order,],
+	row_order = top_genes_order,
+	left_annotation = left_annot,
+	row_names_gp = gpar(fontsize = 6, fontface = "italic"),
+	column_names_gp = gpar(fontsize = 6),
+	cluster_rows = FALSE,
+	clustering_distance_columns = "pearson",
+	name = "HLA-E Z-score",
+	column_title = "HLA-E Z-score",
+	heatmap_legend_param = list(border = TRUE),
+	col = circlize::colorRamp2(c(0,-100),c("white","blue")),
+	border = TRUE
+) +
+
+ComplexHeatmap::Heatmap(nSig_mat[top_genes_order,],
+	row_order = top_genes_order,
+	row_names_gp = gpar(fontsize = 6, fontface = "italic"),
+	column_names_gp = gpar(fontsize = 6),
+	cluster_rows = FALSE,
+	column_labels = "Screen hits",
+	column_title = "Num. hits",
+	name = "Number of cell lines\ngene was hit",
+	heatmap_legend_param = list(border = TRUE),
+	col = circlize::colorRamp2(c(1,4),c("white","purple")),
+	border = TRUE
+) +
+
+ComplexHeatmap::Heatmap(viability_mat[top_genes_order,],
+	row_order = top_genes_order,
+	row_names_gp = gpar(fontsize = 6, fontface = "italic"),
+	column_names_gp = gpar(fontsize = 6),
+	cluster_rows = FALSE,
+	column_labels = "Viability",
+	column_title = "Viability",
+	name = "Number of cell lines\nwith affected viability",
+	heatmap_legend_param = list(border = TRUE, at = c(0, 1, 2)),
+	col = circlize::colorRamp2(c(0,2),c("white","green4")),
+	border = TRUE
+) +
+ComplexHeatmap::Heatmap(specificity_mat[top_genes_order,],
+	row_order = top_genes_order,
+	column_order = col_orders,
+	row_names_gp = gpar(fontsize = 6, fontface = "italic"),
+	column_names_gp = gpar(fontsize = 6),
+	cluster_rows = FALSE,
+	cluster_columns = FALSE,
+	name = "HLA-E specificity",
+	column_title = "HLA-E specificity",
+	heatmap_legend_param = list(border = TRUE),
+	col = circlize::colorRamp2(c(0,100),c("white","red")),
+	border = TRUE
+) +
+ComplexHeatmap::Heatmap(dependency_mat[top_genes_order,],
+  row_order = top_genes_order,
+  row_names_gp = gpar(fontsize = 6, fontface = "italic"),
+  column_names_gp = gpar(fontsize = 6),
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  name = "CRISPR dependency\nDepMap B-cell lymphoma",  ## Note fancy labels to color NA as gray
+  column_title = "CRISPR dependency",
+  heatmap_legend_param = list(border = TRUE, at = c(-2, 0, 0.6), labels = c(-2, 0, NA)),
+  col = circlize::colorRamp2(c(-2, 0, 0.5, 0.6),c("blue","white", "white","gray")),
+  border = TRUE
+) +
+ComplexHeatmap::Heatmap(hla_class1_hits_mat[top_genes_order,],
+	row_order = top_genes_order,
+	row_names_gp = gpar(fontsize = 6, fontface = "italic"),
+	column_names_gp = gpar(fontsize = 6),
+	cluster_rows = FALSE,
+	cluster_columns = FALSE,
+	name = "HLA-ABC hit",
+	column_title = "Published HLA-ABC hit",
+	heatmap_legend_param = list(border = TRUE, labels = c("No hit")),
+	col = c("white"),
+	border = TRUE
+)
+draw(heatmap2)
+
+```
+
+```{r}
+#| echo: false
+pdf("SecondaryScreen_selectTopHits_Heatmap2.pdf",width=12)
+draw(heatmap2)
+dev.off()
+```
+
+# Get session info
+
+```{r}
+sessionInfo()
+```
