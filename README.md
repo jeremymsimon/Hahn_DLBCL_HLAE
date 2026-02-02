@@ -8,4 +8,4 @@ https://jeremymsimon.github.io/Hahn_DLBCL_HLAE/seurat.html
 https://jeremymsimon.github.io/Hahn_DLBCL_HLAE/Li_DLBCL_CELLXGENE_2025_KLRC1_TNK_exploration.html
 
 ## HLA expression, copy number, and SNP analysis and visualization in DLBCL tumors
-https://jeremymsimon.github.io/Hahn_DLBCL_HLAE/Exploration_SEC62_HLA-E_DLBCL2018
+https://jeremymsimon.github.io/Hahn_DLBCL_HLAE/Exploration_SEC62_HLA-E_DLBCL2018.html
